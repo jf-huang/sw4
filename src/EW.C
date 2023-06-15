@@ -7910,6 +7910,8 @@ void EW::setup_viscoelastic( )
 // use base 0 indexing of matrix
 #define a(i,j) a_[i+j*nc]
 
+		float_sw4 trans_omega = 2*M_PI*m_transfreq;
+
 // loop over all grid points in all grids
        for( g = 0 ; g < mNumberOfGrids; g++ )
 #pragma omp parallel for
@@ -7930,16 +7932,17 @@ void EW::setup_viscoelastic( )
 		   float_sw4 kappa_tmp = lambda_tmp + 2*mu_tmp;
 		   float_sw4 qs = mQs[g](i,j,k);
 		   float_sw4 qp = mQp[g](i,j,k);
-	    
+       float_sw4 q_tmp = qs;
 //
 // qs gives beta coefficients
 //
 		   for (int q=0; q<nc; q++)
 		   {
-		      beta[q] = 1./qs;
+          q_tmp = (omc[q] > trans_omega) ? pow(omc[q] / trans_omega, m_phi)*qs : qs; // piecewise power-law Q
+		      beta[q] = 1./q_tmp;
 		      for (int nu=0; nu<n; nu++)
 		      {
-			 a(q,nu) = (omc[q]*mOmegaVE[nu] + SQR(mOmegaVE[nu])/qs)/(SQR(mOmegaVE[nu]) + SQR(omc[q]));
+			 a(q,nu) = (omc[q]*mOmegaVE[nu] + SQR(mOmegaVE[nu])/q_tmp)/(SQR(mOmegaVE[nu]) + SQR(omc[q]));
 		      }
 		   }
 // solve the system in least squares sense
@@ -7981,12 +7984,14 @@ void EW::setup_viscoelastic( )
 //
 // qp gives gamma coefficients
 //
+       q_tmp = qp;
 		   for (int q=0; q<nc; q++)
 		   {
-		      gamma[q] = 1./qp;
+          q_tmp = (omc[q] > trans_omega) ? pow(omc[q] / trans_omega, m_phi)*qp : qp; // piecewise power-law Q
+		      gamma[q] = 1./q_tmp;
 		      for (int nu=0; nu<n; nu++)
 		      {
-			 a(q,nu) = (omc[q]*mOmegaVE[nu] + SQR(mOmegaVE[nu])/qp)/(SQR(mOmegaVE[nu]) + SQR(omc[q]));
+			 a(q,nu) = (omc[q]*mOmegaVE[nu] + SQR(mOmegaVE[nu])/q_tmp)/(SQR(mOmegaVE[nu]) + SQR(omc[q]));
 		      }
 		   }
     
@@ -8067,6 +8072,9 @@ void EW::reverse_setup_viscoelastic( )
 
 // use base 0 indexing of matrix
 #define a(i,j) a_[i+j*nc]
+
+		float_sw4 trans_omega = 2*M_PI*m_transfreq;
+
        for( int g = 0 ; g < mNumberOfGrids; g++ )
 #pragma omp parallel for
 	  for(int k=m_kStart[g]; k<= m_kEnd[g]; k++ )
@@ -8087,16 +8095,18 @@ void EW::reverse_setup_viscoelastic( )
                    float_sw4 lambda_tmp = mLambda[g](i,j,k);
                    float_sw4 qs = mQs[g](i,j,k);
                    float_sw4 qp = mQp[g](i,j,k);
+                   float_sw4 q_tmp = qs;
 
             //
             // qs gives beta coefficients
             //
                    for (int q=0; q<nc; q++)
                    {
-                      beta[q] = 1./qs;
+                      q_tmp = (omc[q] > trans_omega) ? pow(omc[q] / trans_omega, m_phi)*qs : qs; // piecewise power-law Q
+                      beta[q] = 1./q_tmp;
                       for (int nu=0; nu<n; nu++)
                       {
-                         a(q,nu) = (omc[q]*mOmegaVE[nu] + SQR(mOmegaVE[nu])/qs)/(SQR(mOmegaVE[nu]) + SQR(omc[q]));
+                         a(q,nu) = (omc[q]*mOmegaVE[nu] + SQR(mOmegaVE[nu])/q_tmp)/(SQR(mOmegaVE[nu]) + SQR(omc[q]));
                       }
                    }
             // solve the system in least squares sense
@@ -8126,7 +8136,7 @@ void EW::reverse_setup_viscoelastic( )
                    rem = 1 - rem;
                    float_sw4 mmag = sqrt(SQR(rem)+SQR(imm));
             // should also divide by cos^2(delta/2), where delta is the loss-angle, but this makes minimal difference for Q>25
-                   float_sw4 mu_0 = mu_tmp/mmag; 
+                  //  float_sw4 mu_0 = mu_tmp/mmag; 
             // calculate viscoelastic mu:
                    /* for (int nu=0; nu<n; nu++) */
                    /* { */
@@ -8139,12 +8149,14 @@ void EW::reverse_setup_viscoelastic( )
             //
             // qp gives gamma coefficients
             //
+                   q_tmp = qp;
                    for (int q=0; q<nc; q++)
                    {
-                      gamma[q] = 1./qp;
+                      q_tmp = (omc[q] > trans_omega) ? pow(omc[q] / trans_omega, m_phi)*qp : qp; // piecewise power-law Q
+                      gamma[q] = 1./q_tmp;
                       for (int nu=0; nu<n; nu++)
                       {
-                         a(q,nu) = (omc[q]*mOmegaVE[nu] + SQR(mOmegaVE[nu])/qp)/(SQR(mOmegaVE[nu]) + SQR(omc[q]));
+                         a(q,nu) = (omc[q]*mOmegaVE[nu] + SQR(mOmegaVE[nu])/q_tmp)/(SQR(mOmegaVE[nu]) + SQR(omc[q]));
                       }
                    }
 

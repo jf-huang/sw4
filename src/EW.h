@@ -1533,6 +1533,7 @@ bool m_use_attenuation, m_att_use_max_frequency;
 int m_number_mechanisms;
 float_sw4 m_velo_omega, m_min_omega, m_max_omega, m_att_max_frequency, m_att_ppw;
 float_sw4 m_qmultiplier;
+float_sw4 m_transfreq, m_phi; // jfhuang: transition frequency and exponent for a power-law Q
 
 vector<Sarray> mQp, mQs;
 
