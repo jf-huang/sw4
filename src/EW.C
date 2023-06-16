@@ -7910,7 +7910,7 @@ void EW::setup_viscoelastic( )
 // use base 0 indexing of matrix
 #define a(i,j) a_[i+j*nc]
 
-		float_sw4 trans_omega = 2*M_PI*m_transfreq;
+      float_sw4 trans_omega = 2*M_PI*m_transfreq;
 
 // loop over all grid points in all grids
        for( g = 0 ; g < mNumberOfGrids; g++ )

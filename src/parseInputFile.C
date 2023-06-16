@@ -1503,7 +1503,7 @@ void EW::processAttenuation(char* buffer)
      }
      else if( startswith("phi=",token) )
      {
-        token += 6;
+        token += 4;
         m_phi = atof( token );
      }
      else
