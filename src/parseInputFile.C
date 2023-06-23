@@ -1408,6 +1408,15 @@ void EW::processAttenuation(char* buffer) {
       m_qmultiplier = atof(token);  //
       CHECK_INPUT(m_qmultiplier > 0,
                   "ERROR: qmultiplier must be positive, not " << m_qmultiplier);
+    } else if( startswith("transfreq=",token) ) {
+      token += 10;
+      m_transfreq = atof( token );
+      CHECK_INPUT(m_transfreq > 0, 
+                  "ERROR: m_transfreq must be positive, not " << m_transfreq);
+    } else if( startswith("phi=",token) )
+    {
+      token += 4;
+      m_phi = atof( token );
     } else {
       badOption("attenuation", token);
     }
@@ -1417,6 +1426,12 @@ void EW::processAttenuation(char* buffer) {
     if (m_myRank == 0)
       cout << "ERROR: Can not give both minppw and maxfreq for attenuation "
            << endl;
+    MPI_Abort(MPI_COMM_WORLD, 1);
+  }
+  if (m_transfreq > m_att_max_frequency) {
+    if (m_myRank == 0)
+      printf("ERROR: transfreq=%e [Hz] larger than maxfreq=%e [Hz]\n", 
+             m_transfreq, m_att_max_frequency);
     MPI_Abort(MPI_COMM_WORLD, 1);
   }
 

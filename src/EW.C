@@ -593,6 +593,8 @@ EW::EW(const string& fileName, vector<vector<Source*>>& a_GlobalSources,
       m_velo_omega(-1.0),
       m_min_omega(-1.0),
       m_max_omega(-1.0),
+      m_transfreq(2.0),
+      m_phi(0.0),
       m_geodynbc_found(false),
       m_geodynbc_center(false),
       m_do_geodynbc(false),
@@ -7856,6 +7858,13 @@ void EW::setup_attenuation_relaxation(float_sw4 minvsoh) {
         "      max freq=%e [Hz], min_freq=%e [Hz], velo_freq=%e [Hz]\n\n",
         m_number_mechanisms, m_max_omega / 2 / M_PI, m_min_omega / 2 / M_PI,
         m_velo_omega / 2 / M_PI);
+    if (abs(m_phi) > 0.0) // m_phi larger than default value (0.0) -> power-law Q
+    {
+      printf("      (tuned for contant Q to power-law Q transition: trans_freq=%e [Hz], exponent phi=%e)\n\n",
+      m_transfreq, m_phi);
+    } else {
+      printf("      (tuned for contant Q)\n\n");
+    }
   }
   int n = m_number_mechanisms;
   if (n == 1) {
@@ -7895,6 +7904,8 @@ void EW::setup_viscoelastic() {
       for (k = 0; k < nc; k++) printf("omc[%i]=%e", k, omc[k]);
       printf("\n\n");
     }
+
+    float_sw4 trans_omega = 2 * M_PI * m_transfreq;
 
 // setup least squares problem (matrix and rhs depends on Qs & Qp)
 
@@ -7942,16 +7953,19 @@ void EW::setup_viscoelastic() {
             float_sw4 kappa_tmp = lambda_tmp + 2 * mu_tmp;
             float_sw4 qs = mQs[g](i, j, k);
             float_sw4 qp = mQp[g](i, j, k);
+            float_sw4 q_tmp = qs;
 
             //
             // qs gives beta coefficients
             //
             for (int q = 0; q < nc; q++) {
-              beta[q] = 1. / qs;
+              // constant Q to power-law Q transition
+              q_tmp = (omc[q] > trans_omega) ? pow(omc[q] / trans_omega, m_phi) * qs : qs;
+              beta[q] = 1. / q_tmp;
               /// if (doit)std::cout<<"M["<<q<<","<<qs<<"]=";
               for (int nu = 0; nu < n; nu++) {
                 double tmp = a(q, nu) =
-                    (omc[q] * mOmegaVE[nu] + SQR(mOmegaVE[nu]) / qs) /
+                    (omc[q] * mOmegaVE[nu] + SQR(mOmegaVE[nu]) / q_tmp) /
                     (SQR(mOmegaVE[nu]) + SQR(omc[q]));
                 // if (doit)std::cout<<a(q,nu)<<","<<mOmegaVE[nu]<<":";
               }
@@ -8002,9 +8016,11 @@ void EW::setup_viscoelastic() {
             // qp gives gamma coefficients
             //
             for (int q = 0; q < nc; q++) {
-              gamma[q] = 1. / qp;
+              // constant Q to power-law Q transition
+              q_tmp = (omc[q] > trans_omega) ? pow(omc[q] / trans_omega, m_phi) * qp : qp;
+              gamma[q] = 1. / q_tmp;
               for (int nu = 0; nu < n; nu++) {
-                a(q, nu) = (omc[q] * mOmegaVE[nu] + SQR(mOmegaVE[nu]) / qp) /
+                a(q, nu) = (omc[q] * mOmegaVE[nu] + SQR(mOmegaVE[nu]) / q_tmp) /
                            (SQR(mOmegaVE[nu]) + SQR(omc[q]));
               }
             }
@@ -8093,6 +8109,8 @@ void EW::reverse_setup_viscoelastic() {
     } else
       omc[0] = mOmegaVE[0];
 
+    float_sw4 trans_omega = 2 * M_PI * m_transfreq;
+
 // use base 0 indexing of matrix
 #define a(i, j) a_[i + j * nc]
     for (int g = 0; g < mNumberOfGrids; g++)
@@ -8113,14 +8131,17 @@ void EW::reverse_setup_viscoelastic() {
             float_sw4 lambda_tmp = mLambda[g](i, j, k);
             float_sw4 qs = mQs[g](i, j, k);
             float_sw4 qp = mQp[g](i, j, k);
+            float_sw4 q_tmp = qs;
 
             //
             // qs gives beta coefficients
             //
             for (int q = 0; q < nc; q++) {
-              beta[q] = 1. / qs;
+              // constant Q to power-law Q transition
+              q_tmp = (omc[q] > trans_omega) ? pow(omc[q] / trans_omega, m_phi) * qs : qs;
+              beta[q] = 1. / q_tmp;
               for (int nu = 0; nu < n; nu++) {
-                a(q, nu) = (omc[q] * mOmegaVE[nu] + SQR(mOmegaVE[nu]) / qs) /
+                a(q, nu) = (omc[q] * mOmegaVE[nu] + SQR(mOmegaVE[nu]) / q_tmp) /
                            (SQR(mOmegaVE[nu]) + SQR(omc[q]));
               }
             }
@@ -8171,9 +8192,11 @@ void EW::reverse_setup_viscoelastic() {
             // qp gives gamma coefficients
             //
             for (int q = 0; q < nc; q++) {
-              gamma[q] = 1. / qp;
+              // constant Q to power-law Q transition
+              q_tmp = (omc[q] > trans_omega) ? pow(omc[q] / trans_omega, m_phi) * qp : qp;
+              gamma[q] = 1. / q_tmp;
               for (int nu = 0; nu < n; nu++) {
-                a(q, nu) = (omc[q] * mOmegaVE[nu] + SQR(mOmegaVE[nu]) / qp) /
+                a(q, nu) = (omc[q] * mOmegaVE[nu] + SQR(mOmegaVE[nu]) / q_tmp) /
                            (SQR(mOmegaVE[nu]) + SQR(omc[q]));
               }
             }
