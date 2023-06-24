@@ -7855,7 +7855,7 @@ void EW::setup_attenuation_relaxation(float_sw4 minvsoh) {
   if (proc_zero()) {
     printf(
         "\n*** Attenuation parameters calculated for %i mechanisms,\n"
-        "      max freq=%e [Hz], min_freq=%e [Hz], velo_freq=%e [Hz]\n\n",
+        "      max freq=%e [Hz], min_freq=%e [Hz], velo_freq=%e [Hz]\n",
         m_number_mechanisms, m_max_omega / 2 / M_PI, m_min_omega / 2 / M_PI,
         m_velo_omega / 2 / M_PI);
     if (abs(m_phi) > 0.0) // m_phi larger than default value (0.0) -> power-law Q
