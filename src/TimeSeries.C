@@ -3078,15 +3078,24 @@ void TimeSeries::readSACHDF5(EW* ew, string FileName, bool ignore_utc) {
     int is_nsew, npts, sw4npts;
     readAttrInt(grp, "ISNSEW", &is_nsew);
 
-    if (is_nsew == 1) {
+    bool has_nsew = H5Lexists(grp, "EW", H5P_DEFAULT) > 0;
+    bool has_xyz = H5Lexists(grp, "X", H5P_DEFAULT) > 0;
+
+    if (has_nsew && (is_nsew == 1 || !has_xyz)) {
       dset_names[0] = "EW";
       dset_names[1] = "NS";
       dset_names[2] = "UP";
-    } else {
+    } else if (has_xyz) {
       cartesian = true;
       dset_names[0] = "X";
       dset_names[1] = "Y";
       dset_names[2] = "Z";
+    } else {
+      cout << "ERROR: no complete displacement component set in group ["
+           << m_staName << "]" << endl;
+      H5Gclose(grp);
+      H5Fclose(fid);
+      return;
     }
     m_xyzcomponent = cartesian;
 
@@ -3377,7 +3386,7 @@ void TimeSeries::resetHDF5file() {
   closeHDF5File();
 }
 
-hid_t TimeSeries::openHDF5File(std::string suffix) {
+hid_t TimeSeries::openHDF5File(std::string suffix, bool quiet) {
   hid_t fapl;
   bool is_debug = false;
   /* is_debug = true; */
@@ -3399,7 +3408,7 @@ hid_t TimeSeries::openHDF5File(std::string suffix) {
       m_hdf5Name.find(".h5") == string::npos)
     filename.append(".hdf5");
 
-  if (*m_fid_ptr >= 0 && this->m_ts0Ptr &&
+  if (*m_fid_ptr > 0 && this->m_ts0Ptr &&
       filename.compare(this->m_ts0Ptr->m_fidName) == 0) {
     // If file is alread open, no need to open it again
     return *m_fid_ptr;
@@ -3419,7 +3428,7 @@ hid_t TimeSeries::openHDF5File(std::string suffix) {
 
   *m_fid_ptr = H5Fopen(filename.c_str(), H5F_ACC_RDWR, fapl);
   if (*m_fid_ptr <= 0) {
-    printf("%s Error opening file [%s]\n", __func__, filename.c_str());
+    if (!quiet) printf("%s Error opening file [%s]\n", __func__, filename.c_str());
     H5Pclose(fapl);
     return 0;
   }

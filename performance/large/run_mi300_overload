@@ -1,0 +1,4 @@
+export MPICH_GPU_SUPPORT_ENABLED=1
+flux run -n 8 -c 12 -N 1 --exclusive ./sw4 hmr3.in
+flux run -n 8 -c 12 -N 1 --exclusive ./sw4 h.in.rzansel
+

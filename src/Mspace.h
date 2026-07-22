@@ -32,11 +32,14 @@
 #endif
 #include <cstddef>
 
+void check_affinity(int rank);
+
 #if defined(ENABLE_CUDA)
 #include <cuda_profiler_api.h>
 #include <nvml.h>
 
 #include "cuda_runtime.h"
+
 bool mpi_supports_device_buffers();
 void CheckError(cudaError_t const err, const char *file, char const *const fun,
                 const int line);

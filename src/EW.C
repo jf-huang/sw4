@@ -8926,7 +8926,8 @@ AllDims* EW::get_fine_alldimobject() {
   int g = mNumberOfCartesianGrids - 1;
   AllDims* fine = new AllDims(m_proc_array[0], m_proc_array[1], 1, 1,
                               m_global_nx[g], 1, m_global_ny[g], 1,
-                              m_global_nz[g], m_ghost_points, m_ppadding);
+                              m_global_nz[g], m_ghost_points, m_ppadding,
+                              m_cartesian_communicator);
   return fine;
 }
 //-----------------------------------------------------------------------
@@ -9251,6 +9252,7 @@ static char* read_hdf5_attr_str(hid_t loc, const char* name) {
   /* fprintf(stderr, "Read data: [%s]\n", data); */
   return data;
 }
+#include "GMGHDF5Helpers.h"
 #endif
 
 //-----------------------------------------------------------------------
@@ -9260,10 +9262,12 @@ void EW::extractTopographyFromGMG(std::string a_topoFileName) {
 #ifdef USE_HDF5
   Sarray gridElev;
   herr_t ierr;
-  hid_t file_id, dataset_id, datatype_id, group_id, dataspace_id;
+  hid_t file_id, dataset_id, datatype_id, group_id;
   int prec, str_len;
-  double az = 0, origin_x = 0, origin_y = 0, hh = 0, alpha = 0;
-  hsize_t dims[2];
+  double az = 0, origin_x = 0, origin_y = 0, top_hx = 0, top_hy = 0,
+         alpha = 0;
+  hsize_t dims[3];
+  const char* surface_name = NULL;
   char* crs_to = NULL;
 
   if (m_myRank == 0) {
@@ -9280,18 +9284,19 @@ void EW::extractTopographyFromGMG(std::string a_topoFileName) {
     group_id = H5Gopen(file_id, "surfaces", H5P_DEFAULT);
     ASSERT(group_id >= 0);
 
-    dataset_id = H5Dopen(group_id, "topography_bathymetry", H5P_DEFAULT);
-    ASSERT(dataset_id >= 0);
+    dataset_id = open_gmg_surface_dataset(group_id, &surface_name,
+                                          GMG_SURFACE_TOPOGRAPHY);
+    CHECK_INPUT(dataset_id >= 0,
+                "ERROR: GMG /surfaces must contain one of: top_surface, "
+                "topography_bathymetry");
 
-    dataspace_id = H5Dget_space(dataset_id);
-    H5Sget_simple_extent_dims(dataspace_id, dims, NULL);
-    H5Sclose(dataspace_id);
+    read_gmg_surface_dims(dataset_id, dims);
 
     datatype_id = H5Dget_type(dataset_id);
     prec = (int)H5Tget_size(datatype_id);
     H5Tclose(datatype_id);
 
-    read_hdf5_attr(dataset_id, H5T_IEEE_F64LE, "resolution_horiz", &hh);
+    read_gmg_surface_spacing(dataset_id, top_hx, top_hy);
 
     crs_to = read_hdf5_attr_str(file_id, "crs");
     str_len = (int)(strlen(crs_to) + 1);
@@ -9300,8 +9305,9 @@ void EW::extractTopographyFromGMG(std::string a_topoFileName) {
   MPI_Bcast(&origin_x, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
   MPI_Bcast(&origin_y, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
   MPI_Bcast(&az, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-  MPI_Bcast(&hh, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-  MPI_Bcast(dims, 2, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&top_hx, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&top_hy, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  MPI_Bcast(dims, 3, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
   MPI_Bcast(&prec, 1, MPI_INT, 0, MPI_COMM_WORLD);
   MPI_Bcast(&str_len, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
@@ -9309,16 +9315,17 @@ void EW::extractTopographyFromGMG(std::string a_topoFileName) {
 
   MPI_Bcast(crs_to, str_len, MPI_CHAR, 0, MPI_COMM_WORLD);
 
-  // For some reason origin_x is not correctly read sometimes
-  if (origin_x < 1.0) {
-    origin_x = 99286.2;
-    if (m_myRank == 0)
-      printf("GMG origin_x read zero value, correct to 99286.2 \n");
-  }
-
-  ASSERT(origin_x > 0);
-  ASSERT(origin_y > 0);
-  ASSERT(az > 0);
+  CHECK_INPUT(origin_x > 0 && origin_y > 0,
+              "ERROR: invalid GMG origin values origin_x="
+                  << origin_x << " origin_y=" << origin_y);
+  CHECK_INPUT(az > 0, "ERROR: invalid GMG y_azimuth " << az);
+  CHECK_INPUT(top_hx > 0 && top_hy > 0,
+              "ERROR: invalid GMG surface spacing hx="
+                  << top_hx << " hy=" << top_hy);
+  CHECK_INPUT(dims[0] > 1 && dims[1] > 1,
+              "ERROR: GMG surface dataset must be at least 2x2 for "
+              "interpolation, got "
+                  << dims[0] << "x" << dims[1]);
 
   // Convert GMG az to SW4 az
   alpha = az - 180.0;
@@ -9332,7 +9339,10 @@ void EW::extractTopographyFromGMG(std::string a_topoFileName) {
   if (m_myRank == 0 && mVerbose >= 2) {
     printf("GMG header: azimuth=%e, origin_x=%f, origin_y=%f\n", az, origin_x,
            origin_y);
-    printf("            hh=%e, ni=%llu, nj=%llu\n", hh, dims[0], dims[1]);
+    printf("            surface=%s, hx=%e, hy=%e, ni=%llu, nj=%llu\n",
+           surface_name ? surface_name : "broadcast", top_hx, top_hy,
+           static_cast<unsigned long long>(dims[0]),
+           static_cast<unsigned long long>(dims[1]));
   }
 
   float* f_data = new float[dims[0] * dims[1]];
@@ -9351,6 +9361,9 @@ void EW::extractTopographyFromGMG(std::string a_topoFileName) {
   int topLevel = mNumberOfGrids - 1;
 
   float_sw4 topomax = -1e30, topomin = 1e30;
+  double gmg_x_min = 1e100, gmg_x_max = -1e100;
+  double gmg_y_min = 1e100, gmg_y_max = -1e100;
+  long long outside_gmg_surface = 0;
 
   /* printf("x0=%f, y0=%f\n", x0, y0); */
   /* printf("topoGMG: m_iStart %d, m_iEnd %d, m_jStart %d, m_jEnd %d\n", */
@@ -9374,8 +9387,7 @@ void EW::extractTopographyFromGMG(std::string a_topoFileName) {
       /* printf("\ncomputeGeographicCoord: %f %f %f %f\n", x, y, sw4_lon,
        * sw4_lat); */
 
-      // GMG x/y, lat/lon is switched from sw4 CRS
-      computeCartesianCoordGMG(gmg_y0, gmg_x0, sw4_lon, sw4_lat, crs_to);
+      computeCartesianCoordGMG(gmg_x0, gmg_y0, sw4_lon, sw4_lat, crs_to);
       /* printf("computeCartesianCoordGMG : %f %f %f %f\n", gmg_x0, gmg_y0,
        * sw4_lon, sw4_lat); */
 
@@ -9386,11 +9398,28 @@ void EW::extractTopographyFromGMG(std::string a_topoFileName) {
       /* printf("converted gmg xy: %f, %f, origin: %f %f\n", gmg_x, gmg_y,
        * origin_x, origin_y); */
 
-      int i0 = static_cast<int>(floor(gmg_x / hh));
-      int j0 = static_cast<int>(floor(gmg_y / hh));
+      if (gmg_x < gmg_x_min) gmg_x_min = gmg_x;
+      if (gmg_x > gmg_x_max) gmg_x_max = gmg_x;
+      if (gmg_y < gmg_y_min) gmg_y_min = gmg_y;
+      if (gmg_y > gmg_y_max) gmg_y_max = gmg_y;
 
-      double fac0 = (gmg_y - j0 * hh) / hh;
-      double fac1 = (gmg_x - i0 * hh) / hh;
+      const double xmax = (dims[0] - 1) * top_hx;
+      const double ymax = (dims[1] - 1) * top_hy;
+      const double tol =
+          std::max(1e-6 * std::max(top_hx, top_hy),
+                   1e-10 * std::max(xmax, ymax));
+      const double gmg_x_clamped =
+          gmg_clamp_coordinate(gmg_x, 0.0, xmax, tol, outside_gmg_surface);
+      const double gmg_y_clamped =
+          gmg_clamp_coordinate(gmg_y, 0.0, ymax, tol, outside_gmg_surface);
+
+      int i0 = static_cast<int>(floor(gmg_x_clamped / top_hx));
+      int j0 = static_cast<int>(floor(gmg_y_clamped / top_hy));
+      if (i0 >= static_cast<int>(dims[0]) - 1) i0 = dims[0] - 2;
+      if (j0 >= static_cast<int>(dims[1]) - 1) j0 = dims[1] - 2;
+
+      double fac0 = (gmg_y_clamped - j0 * top_hy) / top_hy;
+      double fac1 = (gmg_x_clamped - i0 * top_hx) / top_hx;
 
       /* printf("x=%f, y=%f, i0=%d, j0=%d\n", x, y, i0, j0); */
       /* printf("interp points: %f %f %f %f\n", f_data[i0*dims[1]+j0],
@@ -9424,9 +9453,26 @@ void EW::extractTopographyFromGMG(std::string a_topoFileName) {
   MPI_Barrier(MPI_COMM_WORLD);
   end_time = MPI_Wtime();
 
+  double gmg_x_min_global, gmg_x_max_global, gmg_y_min_global,
+      gmg_y_max_global;
+  long long outside_gmg_surface_global;
+  MPI_Allreduce(&gmg_x_min, &gmg_x_min_global, 1, MPI_DOUBLE, MPI_MIN,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&gmg_x_max, &gmg_x_max_global, 1, MPI_DOUBLE, MPI_MAX,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&gmg_y_min, &gmg_y_min_global, 1, MPI_DOUBLE, MPI_MIN,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&gmg_y_max, &gmg_y_max_global, 1, MPI_DOUBLE, MPI_MAX,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&outside_gmg_surface, &outside_gmg_surface_global, 1,
+                MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+
   if (m_myRank == 0) {
     printf("Read topography from GeoModelGrids time=%e seconds\n",
            end_time - start_time);
+    printf("GMG topography projected bounds: x=[%e,%e], y=[%e,%e]\n",
+           gmg_x_min_global, gmg_x_max_global, gmg_y_min_global,
+           gmg_y_max_global);
     if (mVerbose >= 2) {
       printf("Topo corners %f, %f, %f, %f\n",
              mTopo(m_iStart[topLevel], m_jStart[topLevel], 1),
@@ -9436,6 +9482,12 @@ void EW::extractTopographyFromGMG(std::string a_topoFileName) {
       printf("Topo variation on comp grid: max=%e min=%e\n", topomax, topomin);
     }
   }
+  CHECK_INPUT(
+      outside_gmg_surface_global == 0,
+      "ERROR: GMG topography projection maps "
+          << outside_gmg_surface_global
+          << " grid coordinates outside the surface extent. "
+          << "Check CRS, axis order, origin, and azimuth.");
 #else
   if (m_myRank == 0)
     printf(

@@ -15,6 +15,12 @@
 #include "policies.h"
 #include "sys/sysinfo.h"
 #include "sys/types.h"
+#include <sys/syscall.h>
+#include <sched.h>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 long long node_mem();
 std::string hostname();
@@ -899,6 +905,7 @@ Space GML(const void *ptr) {
     std::cerr << "Invalid value in GML \n";
     return Space::Host;
   }
+#if HIP_MAJOR_VERSION==5
   if (attr.memoryType == hipMemoryTypeHost) {
     return Space::Pinned;
   } else if (attr.memoryType == hipMemoryTypeDevice) {
@@ -907,6 +914,17 @@ Space GML(const void *ptr) {
     return Space::Managed;
   } else
     return Space::Space_Error;
+
+#else
+  if (attr.type == hipMemoryTypeHost) {
+    return Space::Pinned;
+  } else if (attr.type == hipMemoryTypeDevice) {
+    return Space::Managed;
+  } else if (attr.type == hipMemoryTypeUnified) {
+    return Space::Managed;
+  } else
+    return Space::Space_Error;
+#endif
 }
 #endif
 
@@ -1010,3 +1028,41 @@ std::string hostname() {
   gethostname(hostname, HOST_NAME_MAX);
   return std::string(hostname);
 }
+void check_affinity(int rank){
+  cpu_set_t mask,masks[200];
+  char clbuf[7 * CPU_SETSIZE], hostname[MPI_MAX_PROCESSOR_NAME]="DEFAULT";
+  int hostname_size;
+  MPI_Get_processor_name(hostname, &hostname_size);
+  
+  memset(clbuf, 0, sizeof(clbuf));
+  int thread=0;
+#pragma omp parallel firstprivate(thread, mask)
+  {
+#ifdef _OPENMP
+  thread = omp_get_thread_num();
+#endif
+  sched_getaffinity(0, sizeof(mask), &masks[thread]);
+  }
+  int max =1;
+#ifdef _OPENMP
+  max = omp_get_max_threads();
+#endif
+  for( int n=0;n<max;n++){
+    stringstream s;
+    int len;
+    s<<"BINDING:: "<<hostname<<" rank "<<rank<<" thread "<<n<<" cores ";
+    for (int i = 0; i < CPU_SETSIZE; i++){
+      if (CPU_ISSET(i, &masks[n])) {
+	len=0;
+	for(int j=i+1;j<CPU_SETSIZE;j++)  if (CPU_ISSET(j, &masks[n])) { len++; } else { break; }
+	if (len==0) s<<i;
+	else
+	  s<<i<<"-"<<i+len<<" ";
+      }
+    }
+    s<<"\n";
+    std::cout<<s.str();
+  }
+}
+  
+  

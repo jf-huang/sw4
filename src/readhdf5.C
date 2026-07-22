@@ -278,13 +278,30 @@ static herr_t traverse_func(hid_t loc_id, const char *grp_name,
           op_data->outFileName, x, y, z, topodepth, op_data->writeEvery,
           op_data->downSample, !nsew, op_data->event);
 
-      if ((*op_data->GlobalTimeSeries)[op_data->event].size() == 0) {
+      // Share an HDF5 handle only with receivers writing to the same file.
+      // A single shared handle for all rechdf5 output files causes every rank
+      // to close and reopen files when switching receiver sets.
+      TimeSeries *file_ts0 = NULL;
+      for (int ts =
+               (int)(*op_data->GlobalTimeSeries)[op_data->event].size() - 1;
+           ts >= 0; ts--) {
+        TimeSeries *candidate =
+            (*op_data->GlobalTimeSeries)[op_data->event][ts];
+        if (candidate->getUseHDF5() &&
+            candidate->getPath() == ts_ptr->getPath() &&
+            candidate->gethdf5FileName() ==
+                ts_ptr->gethdf5FileName()) {
+          file_ts0 = candidate->getTS0Ptr();
+          break;
+        }
+      }
+
+      if (file_ts0 == NULL) {
         ts_ptr->allocFid();
         ts_ptr->setTS0Ptr(ts_ptr);
       } else {
-        ts_ptr->setFidPtr(
-            (*op_data->GlobalTimeSeries)[op_data->event][0]->getFidPtr());
-        ts_ptr->setTS0Ptr((*op_data->GlobalTimeSeries)[op_data->event][0]);
+        ts_ptr->setFidPtr(file_ts0->getFidPtr());
+        ts_ptr->setTS0Ptr(file_ts0);
       }
 
       if (ts_ptr->myPoint()) {
@@ -575,7 +592,7 @@ void readRuptureHDF5(char *fname,
   int npts = 0, nseg = 0, nsr1 = 0;
   hsize_t dims;
   double rVersion;
-  int nSources = 0, nu1 = 0, nu2 = 0, nu3 = 0;
+  int nSources = 0, nu1 = 0, nu2 = 0, nu3 = 0, nskip_zero_slip = 0;
 
   stime = MPI_Wtime();
   // Only rank 0 reads data, then broadcast to all other processes
@@ -782,19 +799,31 @@ void readRuptureHDF5(char *fname,
             "header)=%e [m]\n",
             slip_sum, slip_m);
       }
-      // scale time series to sum to integrate to one
-      for (int i = 1; i <= nt1dim + 1; i++) {
-        par[i] /= slip_sum;
+      float_sw4 slip_sum_tol = 1e-12;
+      bool skip_zero_slip_point = false;
+      if( slip_sum > -slip_sum_tol && slip_sum < slip_sum_tol )
+      {
+        nskip_zero_slip++;
+        skip_zero_slip_point = true;
+        if( world_rank == 0 && nskip_zero_slip <= 10 )
+          printf("WARNING: rupture point %i has near-zero slip integral (dt*sum(slip_vel)=%e), skipping source creation.\n",
+                 pts+1, slip_sum);
       }
-      if (world_rank == 0 && mVerbose >= 2) {
-        slip_sum = 0;
+      // scale time series to sum to integrate to one
+      if( !skip_zero_slip_point ) {
         for (int i = 1; i <= nt1dim + 1; i++) {
-          slip_sum += par[i];
+          par[i] /= slip_sum;
         }
-        slip_sum *= dt;
-        printf(
-            "INFO: SRF file: After scaling time series: dt*sum(par)=%e [m]\n",
-            slip_sum);
+        if (world_rank == 0 && mVerbose >= 2) {
+          slip_sum = 0;
+          for (int i = 1; i <= nt1dim + 1; i++) {
+            slip_sum += par[i];
+          }
+          slip_sum *= dt;
+          printf(
+              "INFO: SRF file: After scaling time series: dt*sum(par)=%e [m]\n",
+              slip_sum);
+        }
       }
       // done scaling
 
@@ -884,7 +913,7 @@ void readRuptureHDF5(char *fname,
         sourceposerr << "***************************************************"
                      << endl;
         if (world_rank == 0) cout << sourceposerr.str();
-      } else {
+      } else if( !skip_zero_slip_point ) {
         sourcePtr =
             new Source(ew, freq, t0, x, y, z, mxx, mxy, mxz, myy, myz, mzz,
                        tDep, formstring, topodepth, ncyc, par, npar, ipar,
@@ -924,6 +953,8 @@ void readRuptureHDF5(char *fname,
         "Read npts=%i, made %i point moment tensor sources, nu1=%i, nu2=%i, "
         "nu3=%i\n",
         npts, nSources, nu1, nu2, nu3);
+  if (world_rank == 0 && nskip_zero_slip > 0)
+    printf("Skipped %i rupture points with zero slip-velocity integral in u1.\n", nskip_zero_slip);
 
   etime = MPI_Wtime();
   if (is_debug && world_rank == 0)

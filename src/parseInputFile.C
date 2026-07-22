@@ -5917,7 +5917,9 @@ void EW::processRupture(char* buffer,
     sscanf(buf, " %lg", &rVersion);
     if (proc_zero()) printf("Version = %.1f\n", rVersion);
     // read 2nd line, starting header block
-    fgets(buf, bufsize, fd);
+    do {
+        fgets(buf, bufsize, fd);
+    } while (buf[0] == '#');
     char* token = strtok(buf, " \t");
     //    printf("token: '%s'\n", token);
     REQUIRE2(strcmp("PLANE", token) == 0,
@@ -5957,7 +5959,7 @@ void EW::processRupture(char* buffer,
       printf("Number of point sources in data block: %i\n", npts);
 
     // read all point sources
-    int nSources = 0, nu1 = 0, nu2 = 0, nu3 = 0;
+    int nSources = 0, nu1 = 0, nu2 = 0, nu3 = 0, nskip_zero_slip = 0;
     for (int pts = 0; pts < npts; pts++) {
       double lon, lat, dep, stk, dip, area, tinit, dt, rake, slip1, slip2,
           slip3;
@@ -6036,19 +6038,31 @@ void EW::processRupture(char* buffer,
               "header)=%e [m]\n",
               slip_sum, slip_m);
         }
-        // scale time series to sum to integrate to one
-        for (int i = 1; i <= nt1dim + 1; i++) {
-          par[i] /= slip_sum;
+        float_sw4 slip_sum_tol = 1e-12;
+        bool skip_zero_slip_point = false;
+        if( slip_sum > -slip_sum_tol && slip_sum < slip_sum_tol )
+        {
+           nskip_zero_slip++;
+           skip_zero_slip_point = true;
+           if( proc_zero() && nskip_zero_slip <= 10 )
+              printf("WARNING: rupture point %i has near-zero slip integral (dt*sum(slip_vel)=%e), skipping source creation.\n",
+                     pts+1, slip_sum);
         }
-        if (proc_zero() && mVerbose >= 2) {
-          slip_sum = 0;
+        // scale time series to sum to integrate to one
+        if( !skip_zero_slip_point ) {
           for (int i = 1; i <= nt1dim + 1; i++) {
-            slip_sum += par[i];
+            par[i] /= slip_sum;
           }
-          slip_sum *= dt;
-          printf(
-              "INFO: SRF file: After scaling time series: dt*sum(par)=%e [m]\n",
-              slip_sum);
+          if (proc_zero() && mVerbose >= 2) {
+            slip_sum = 0;
+            for (int i = 1; i <= nt1dim + 1; i++) {
+              slip_sum += par[i];
+            }
+            slip_sum *= dt;
+            printf(
+                "INFO: SRF file: After scaling time series: dt*sum(par)=%e [m]\n",
+                slip_sum);
+          }
         }
         // done scaling
 
@@ -6138,7 +6152,7 @@ void EW::processRupture(char* buffer,
           sourceposerr << "***************************************************"
                        << endl;
           if (m_myRank == 0) cout << sourceposerr.str();
-        } else {
+        } else if( !skip_zero_slip_point ) {
           sourcePtr =
               new Source(this, freq, t0, x, y, z, mxx, mxy, mxz, myy, myz, mzz,
                          tDep, formstring, topodepth, ncyc, par, npar, ipar,
@@ -6206,6 +6220,8 @@ void EW::processRupture(char* buffer,
           "Read npts=%i, made %i point moment tensor sources, nu1=%i, nu2=%i, "
           "nu3=%i\n",
           npts, nSources, nu1, nu2, nu3);
+    if (proc_zero() && nskip_zero_slip > 0)
+      printf("Skipped %i rupture points with zero slip-velocity integral in u1.\n", nskip_zero_slip);
 
     fclose(fd);
   }
@@ -7070,12 +7086,28 @@ void EW::processReceiver(char* buffer,
                        writeEvery, downSample, !nsew, event);
 #if USE_HDF5
     if (hdf5format) {
-      if (a_GlobalTimeSeries[event].size() == 0) {
+      // Each HDF5 output file needs its own shared handle.  Receivers in the
+      // same file share a handle, but receivers in different files must not
+      // force one another's files to close and reopen during output.
+      TimeSeries* file_ts0 = NULL;
+      for (int ts = (int)a_GlobalTimeSeries[event].size() - 1; ts >= 0;
+           ts--) {
+        TimeSeries* candidate = a_GlobalTimeSeries[event][ts];
+        if (candidate->getUseHDF5() &&
+            candidate->getPath() == ts_ptr->getPath() &&
+            candidate->gethdf5FileName() ==
+                ts_ptr->gethdf5FileName()) {
+          file_ts0 = candidate->getTS0Ptr();
+          break;
+        }
+      }
+
+      if (file_ts0 == NULL) {
         ts_ptr->allocFid();
         ts_ptr->setTS0Ptr(ts_ptr);
       } else {
-        ts_ptr->setFidPtr(a_GlobalTimeSeries[event][0]->getFidPtr());
-        ts_ptr->setTS0Ptr(a_GlobalTimeSeries[event][0]);
+        ts_ptr->setFidPtr(file_ts0->getFidPtr());
+        ts_ptr->setTS0Ptr(file_ts0);
       }
     }
 #endif
