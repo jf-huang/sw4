@@ -85,6 +85,20 @@ class ESSI3DHDF5 {
 
   hid_t m_file_id;
   hid_t m_es_id;
+
+  void configure_velocity_chunks(hsize_t (&chunk)[4],
+                                 const hsize_t (&target_dims)[4],
+                                 int bufferInterval) const;
+  void apply_velocity_compression(hid_t prop_id, int compressionMode,
+                                  double compressionPar,
+                                  const hsize_t (&target_dims)[4]) const;
+  void copy_velocity_dataset(hid_t src_dset, hid_t dst_dset,
+                             const hsize_t (&src_dims)[4], hid_t dtype,
+                             const hsize_t (&chunk)[4]) const;
+  void ensure_velocity_dataset(const char* name, hid_t dtype,
+                               const hsize_t (&target_dims)[4],
+                               const hsize_t (&chunk)[4], int compressionMode,
+                               double compressionPar) const;
 #endif  // def USE_HDF5
 };
 

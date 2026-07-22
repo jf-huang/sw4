@@ -765,6 +765,7 @@ void EW::solve(vector<Source*>& a_Sources, vector<TimeSeries*>& a_TimeSeries,
   // locking so we can have multiple writer to open and write different datasets
   // of the same file
   setenv("HDF5_USE_FILE_LOCKING", "FALSE", 1);
+  const bool restartHDF5Receivers = m_check_point->do_restart();
   // A single event can have several rechdf5 commands, each with its own
   // output file.  Create each file from only the time series that belong to
   // it; otherwise duplicate station names from different commands collide in
@@ -772,7 +773,6 @@ void EW::solve(vector<Source*>& a_Sources, vector<TimeSeries*>& a_TimeSeries,
   map<string, vector<TimeSeries*> > hdf5TimeSeries;
   for (int tsi = 0; tsi < a_TimeSeries.size(); tsi++) {
     if (a_TimeSeries[tsi]->getUseHDF5()) {
-      a_TimeSeries[tsi]->resetHDF5file();
       string key = a_TimeSeries[tsi]->getPath() + "\n" +
                    a_TimeSeries[tsi]->gethdf5FileName();
       hdf5TimeSeries[key].push_back(a_TimeSeries[tsi]);
@@ -781,24 +781,49 @@ void EW::solve(vector<Source*>& a_Sources, vector<TimeSeries*>& a_TimeSeries,
 
   if (!hdf5TimeSeries.empty()) {
     int create_status = 0;
-    if (m_myRank == 0 && !m_check_point->do_restart()) {
+    vector<int> recreateFiles(hdf5TimeSeries.size(), 1);
+    int hdf5FileIndex = 0;
+    if (m_myRank == 0) {
       for (map<string, vector<TimeSeries*> >::iterator it =
                hdf5TimeSeries.begin();
-           it != hdf5TimeSeries.end(); ++it) {
-        if (createTimeSeriesHDF5File(it->second,
-                                     mNumberOfTimeSteps[event] + 1, mDt,
-                                     "") < 0)
-          create_status = -1;
+           it != hdf5TimeSeries.end(); ++it, ++hdf5FileIndex) {
+        for (int tsi = 0; tsi < it->second.size(); tsi++)
+          it->second[tsi]->setNsteps(mNumberOfTimeSteps[event] + 1);
+
+        if (restartHDF5Receivers) {
+          recreateFiles[hdf5FileIndex] = receiverHDF5NeedsResize(
+              it->second, mNumberOfTimeSteps[event] + 1);
+          if (recreateFiles[hdf5FileIndex] < 0) {
+            create_status = -1;
+            recreateFiles[hdf5FileIndex] = 1;
+          }
+        }
+
+        if (!restartHDF5Receivers || recreateFiles[hdf5FileIndex] == 1) {
+          if (createTimeSeriesHDF5File(it->second,
+                                       mNumberOfTimeSteps[event] + 1, mDt,
+                                       "") < 0)
+            create_status = -1;
+        }
       }
     }
     MPI_Bcast(&create_status, 1, MPI_INT, 0, MPI_COMM_WORLD);
     CHECK_INPUT(create_status == 0,
                 "Could not create receiver HDF5 output file(s)");
+    MPI_Bcast(&recreateFiles[0], static_cast<int>(recreateFiles.size()),
+              MPI_INT, 0, MPI_COMM_WORLD);
 
     const int max_open_attempts = 10;
+    hdf5FileIndex = 0;
     for (map<string, vector<TimeSeries*> >::iterator it =
              hdf5TimeSeries.begin();
-         it != hdf5TimeSeries.end(); ++it) {
+         it != hdf5TimeSeries.end(); ++it, ++hdf5FileIndex) {
+      for (int tsi = 0; tsi < it->second.size(); tsi++) {
+        it->second[tsi]->setNsteps(mNumberOfTimeSteps[event] + 1);
+        if (!restartHDF5Receivers || recreateFiles[hdf5FileIndex] == 1)
+          it->second[tsi]->resetHDF5file();
+      }
+
       hid_t fid = 0;
       for (int attempt = 0; attempt < max_open_attempts && fid <= 0;
            attempt++) {
@@ -812,6 +837,11 @@ void EW::solve(vector<Source*>& a_Sources, vector<TimeSeries*>& a_TimeSeries,
                       << it->second[0]->gethdf5FileName() << " on rank "
                       << m_myRank << " after " << max_open_attempts
                       << " attempts");
+
+      if (restartHDF5Receivers && recreateFiles[hdf5FileIndex] == 1) {
+        for (int tsi = 0; tsi < it->second.size(); tsi++)
+          it->second[tsi]->writeFile();
+      }
     }
     MPI_Barrier(MPI_COMM_WORLD);
   }

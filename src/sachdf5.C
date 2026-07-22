@@ -54,6 +54,66 @@
 
 #include "sachdf5.h"
 
+namespace {
+int get_hdf5_dataset_names(TimeSeries* ts, std::string dset_names[9]) {
+  bool xyzcomponent = ts->getXYZcomponent();
+  TimeSeries::receiverMode mode = ts->getMode();
+
+  if (mode == TimeSeries::Displacement) {
+    if (xyzcomponent) {
+      dset_names[0] = "X";
+      dset_names[1] = "Y";
+      dset_names[2] = "Z";
+    } else {
+      dset_names[0] = "EW";
+      dset_names[1] = "NS";
+      dset_names[2] = "UP";
+    }
+    return 3;
+  } else if (mode == TimeSeries::Velocity) {
+    if (xyzcomponent) {
+      dset_names[0] = "Vx";
+      dset_names[1] = "Vy";
+      dset_names[2] = "Vz";
+    } else {
+      dset_names[0] = "Vew";
+      dset_names[1] = "Vns";
+      dset_names[2] = "Vup";
+    }
+    return 3;
+  } else if (mode == TimeSeries::Div) {
+    dset_names[0] = "Div";
+    return 1;
+  } else if (mode == TimeSeries::Curl) {
+    dset_names[0] = "Curlx";
+    dset_names[1] = "Curly";
+    dset_names[2] = "Curlz";
+    return 3;
+  } else if (mode == TimeSeries::Strains) {
+    dset_names[0] = "Uxx";
+    dset_names[1] = "Uyy";
+    dset_names[2] = "Uzz";
+    dset_names[3] = "Uxy";
+    dset_names[4] = "Uxz";
+    dset_names[5] = "Uyz";
+    return 6;
+  } else if (mode == TimeSeries::DisplacementGradient) {
+    dset_names[0] = "DUXDX";
+    dset_names[1] = "DUXDY";
+    dset_names[2] = "DUXDZ";
+    dset_names[3] = "DUYDX";
+    dset_names[4] = "DUYDY";
+    dset_names[5] = "DUYDZ";
+    dset_names[6] = "DUZDX";
+    dset_names[7] = "DUZDY";
+    dset_names[8] = "DUZDZ";
+    return 9;
+  }
+
+  return 0;
+}
+}  // namespace
+
 int createAttr(hid_t loc, const char *name, hid_t type_id, hid_t space_id) {
   hid_t attr, dcpl;
 
@@ -258,7 +318,7 @@ int createTimeSeriesHDF5File(vector<TimeSeries *> &TimeSeries, int totalSteps,
                              float_sw4 delta, string suffix) {
   bool is_debug = false;
 
-  hid_t fid, grp, attr_space1, attr_space3, dset_space, dset, dcpl, fapl;
+  hid_t fid, grp, attr_space1, attr_space3, dset_space, dset, fapl;
   herr_t ret;
   hsize_t dims1 = 1, dims3 = 3, total_dims;
   double start_time, elapsed_time;
@@ -387,10 +447,6 @@ int createTimeSeriesHDF5File(vector<TimeSeries *> &TimeSeries, int totalSteps,
   attr_space1 = H5Screate_simple(1, &dims1, NULL);
   attr_space3 = H5Screate_simple(1, &dims3, NULL);
 
-  dcpl = H5Pcreate(H5P_DATASET_CREATE);
-  H5Pset_alloc_time(dcpl, H5D_ALLOC_TIME_EARLY);
-  H5Pset_fill_time(dcpl, H5D_FILL_TIME_NEVER);
-
   // datetime, human readable string for date and time of start of SW4
   // calculation, e.g. 2019-07-23T01:02:03)
   char utcstr[32];
@@ -457,59 +513,10 @@ int createTimeSeriesHDF5File(vector<TimeSeries *> &TimeSeries, int totalSteps,
     cmpincs[1] = 90.;
     cmpincs[2] = 180.;
     mode = TimeSeries[ts]->getMode();
-    // Datasets
-    if (mode == TimeSeries::Displacement) {
-      ndset = 3;
-      if (xyzcomponent) {
-        dset_names[0] = "X";
-        dset_names[1] = "Y";
-        dset_names[2] = "Z";
-      } else {
-        dset_names[0] = "EW";
-        dset_names[1] = "NS";
-        dset_names[2] = "UP";
-        cmpincs[2] = 0.;
-      }
-    } else if (mode == TimeSeries::Velocity) {
-      ndset = 3;
-      if (xyzcomponent) {
-        dset_names[0] = "Vx";
-        dset_names[1] = "Vy";
-        dset_names[2] = "Vz";
-      } else {
-        dset_names[0] = "Vew";
-        dset_names[1] = "Vns";
-        dset_names[2] = "Vup";
-        cmpincs[2] = 0.;
-      }
-    } else if (mode == TimeSeries::Div) {
-      ndset = 1;
-      dset_names[0] = "Div";
-    } else if (mode == TimeSeries::Curl) {
-      ndset = 3;
-      dset_names[0] = "Curlx";
-      dset_names[1] = "Curly";
-      dset_names[2] = "Curlz";
-    } else if (mode == TimeSeries::Strains) {
-      ndset = 6;
-      dset_names[0] = "Uxx";
-      dset_names[1] = "Uyy";
-      dset_names[2] = "Uzz";
-      dset_names[3] = "Uxy";
-      dset_names[4] = "Uxz";
-      dset_names[5] = "Uyz";
-    } else if (mode == TimeSeries::DisplacementGradient) {
-      ndset = 9;
-      dset_names[0] = "DUXDX";
-      dset_names[1] = "DUXDY";
-      dset_names[2] = "DUXDZ";
-      dset_names[3] = "DUYDX";
-      dset_names[4] = "DUYDY";
-      dset_names[5] = "DUYDZ";
-      dset_names[6] = "DUZDX";
-      dset_names[7] = "DUZDY";
-      dset_names[8] = "DUZDZ";
-    }
+    ndset = get_hdf5_dataset_names(TimeSeries[ts], dset_names);
+    if (!xyzcomponent &&
+        (mode == TimeSeries::Displacement || mode == TimeSeries::Velocity))
+      cmpincs[2] = 0.;
 
     for (int i = 0; i < ndset; i++) {
       total_dims = (hsize_t)(totalSteps / TimeSeries[ts]->getDownSample());
@@ -517,10 +524,18 @@ int createTimeSeriesHDF5File(vector<TimeSeries *> &TimeSeries, int totalSteps,
         printf("%s: Error with dataset length 0\n", __func__);
         return -1;
       }
-      dset_space = H5Screate_simple(1, &total_dims, NULL);
+      hsize_t max_dims = H5S_UNLIMITED;
+      hsize_t chunk_dims = total_dims < 4096 ? total_dims : 4096;
+      if (chunk_dims == 0) chunk_dims = 1;
+      hid_t dset_dcpl = H5Pcreate(H5P_DATASET_CREATE);
+      H5Pset_alloc_time(dset_dcpl, H5D_ALLOC_TIME_EARLY);
+      H5Pset_fill_time(dset_dcpl, H5D_FILL_TIME_NEVER);
+      H5Pset_chunk(dset_dcpl, 1, &chunk_dims);
+      dset_space = H5Screate_simple(1, &total_dims, &max_dims);
       dset = H5Dcreate(grp, dset_names[i].c_str(), H5T_NATIVE_FLOAT, dset_space,
-                       H5P_DEFAULT, dcpl, H5P_DEFAULT);
+                       H5P_DEFAULT, dset_dcpl, H5P_DEFAULT);
       H5Sclose(dset_space);
+      H5Pclose(dset_dcpl);
       ASSERT(dset >= 0);
 #ifdef USE_DSET_ATTR
       std::string incname = dset_names[i] + "CMPINC";
@@ -545,7 +560,6 @@ int createTimeSeriesHDF5File(vector<TimeSeries *> &TimeSeries, int totalSteps,
     TimeSeries[ts]->setNsteps(totalSteps);
   }
 
-  H5Pclose(dcpl);
   H5Sclose(attr_space1);
   H5Sclose(attr_space3);
   H5Fflush(fid, H5F_SCOPE_GLOBAL);
@@ -556,6 +570,69 @@ int createTimeSeriesHDF5File(vector<TimeSeries *> &TimeSeries, int totalSteps,
          elapsed_time);
   fflush(stdout);
   return 1;
+}
+
+int receiverHDF5NeedsResize(vector<TimeSeries *> &TimeSeries, int totalSteps) {
+  if (TimeSeries.size() == 0) return 0;
+
+  std::string path = TimeSeries[0]->getPath();
+  std::string name = TimeSeries[0]->gethdf5FileName();
+  std::string filename;
+  if (path != ".") filename = path;
+  filename.append(name);
+  if (filename.find(".hdf5") == string::npos &&
+      filename.find(".h5") == string::npos)
+    filename.append(".hdf5");
+
+  hid_t fid = H5Fopen(filename.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+  if (fid < 0) {
+    printf("%s: Recreating file [%s] because it could not be opened\n",
+           __func__, filename.c_str());
+    return 1;
+  }
+
+  for (int ts = 0; ts < TimeSeries.size(); ts++) {
+    std::string stationname = TimeSeries[ts]->getStationName();
+    hid_t grp = H5Gopen(fid, stationname.c_str(), H5P_DEFAULT);
+    if (grp < 0) {
+      printf("%s: Recreating file [%s] because group [%s] is missing\n",
+             __func__, filename.c_str(), stationname.c_str());
+      H5Fclose(fid);
+      return 1;
+    }
+
+    std::string dset_names[9];
+    int ndset = get_hdf5_dataset_names(TimeSeries[ts], dset_names);
+    hsize_t desired_dims =
+        (hsize_t)(totalSteps / TimeSeries[ts]->getDownSample());
+
+    for (int i = 0; i < ndset; i++) {
+      hid_t dset = H5Dopen(grp, dset_names[i].c_str(), H5P_DEFAULT);
+      if (dset < 0) {
+        printf("%s: Recreating file [%s] because dataset [%s/%s] is missing\n",
+               __func__, filename.c_str(),
+               stationname.c_str(), dset_names[i].c_str());
+        H5Gclose(grp);
+        H5Fclose(fid);
+        return 1;
+      }
+      hid_t dspace = H5Dget_space(dset);
+      hsize_t dims = 0;
+      H5Sget_simple_extent_dims(dspace, &dims, NULL);
+      H5Sclose(dspace);
+      H5Dclose(dset);
+
+      if (dims < desired_dims) {
+        H5Gclose(grp);
+        H5Fclose(fid);
+        return 1;
+      }
+    }
+    H5Gclose(grp);
+  }
+
+  H5Fclose(fid);
+  return 0;
 }
 
 int readAttrStr(hid_t loc, const char *name, char *str) {

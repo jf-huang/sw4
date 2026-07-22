@@ -34,6 +34,9 @@
 #include "EW.h"
 #include "mpi.h"
 
+#include <algorithm>
+#include <vector>
+
 #ifdef USE_ZFP
 #include "H5Zzfp_lib.h"
 #include "H5Zzfp_props.h"
@@ -149,6 +152,249 @@ void ESSI3DHDF5::create_file(bool is_restart, bool is_root) {
   H5Pclose(fapl);
 #endif
   return;
+}
+
+void ESSI3DHDF5::configure_velocity_chunks(
+    hsize_t (&chunk)[4], const hsize_t (&target_dims)[4],
+    int bufferInterval) const {
+  for (int i = 0; i < 4; i++) chunk[i] = 1;
+
+  MPI_Allreduce(&m_window_dims[1], &chunk[1], 3, MPI_UNSIGNED_LONG_LONG,
+                MPI_MAX, MPI_COMM_WORLD);
+
+  chunk[0] = std::max<hsize_t>(1, std::min<hsize_t>(bufferInterval, target_dims[0]));
+
+  for (int i = 1; i < 4; i++) {
+    if (chunk[i] < 1) chunk[i] = 1;
+    if (chunk[i] > target_dims[i]) chunk[i] = target_dims[i];
+  }
+
+  for (int i = 1; i < 3; i++)
+    if (chunk[i] > 4) chunk[i] = (chunk[i] / 4) * 4;
+
+  char* env_char = getenv("SSI_CHUNK_X");
+  if (env_char != NULL) chunk[1] = std::max<hsize_t>(1, atoi(env_char));
+
+  env_char = getenv("SSI_CHUNK_Y");
+  if (env_char != NULL) chunk[2] = std::max<hsize_t>(1, atoi(env_char));
+
+  env_char = getenv("SSI_CHUNK_Z");
+  if (env_char != NULL) chunk[3] = std::max<hsize_t>(1, atoi(env_char));
+
+  for (int i = 1; i < 4; i++)
+    if (chunk[i] > target_dims[i]) chunk[i] = target_dims[i];
+
+  const hsize_t max_chunk_bytes = 268435456ull;
+  hsize_t total_chunk_size = m_precision;
+  for (int i = 0; i < 4; i++) total_chunk_size *= chunk[i];
+
+  while (total_chunk_size > max_chunk_bytes) {
+    int reduce_dim = 1;
+    for (int i = 2; i < 4; i++)
+      if (chunk[i] > chunk[reduce_dim]) reduce_dim = i;
+
+    if (chunk[reduce_dim] > 1) {
+      total_chunk_size /= 2;
+      chunk[reduce_dim] = std::max<hsize_t>(1, chunk[reduce_dim] / 2);
+    } else if (chunk[0] > 1) {
+      total_chunk_size /= 2;
+      chunk[0] = std::max<hsize_t>(1, chunk[0] / 2);
+    } else
+      break;
+  }
+}
+
+void ESSI3DHDF5::apply_velocity_compression(
+    hid_t prop_id, int compressionMode, double compressionPar,
+    const hsize_t (&target_dims)[4]) const {
+  if (compressionMode == SW4_SZIP) {
+    H5Pset_szip(prop_id, H5_SZIP_NN_OPTION_MASK, 32);
+  } else if (compressionMode == SW4_ZLIB) {
+    H5Pset_deflate(prop_id, (int)compressionPar);
+  }
+#ifdef USE_ZFP
+  else if (compressionMode == SW4_ZFP_MODE_RATE) {
+    H5Pset_zfp_rate(prop_id, compressionPar);
+  } else if (compressionMode == SW4_ZFP_MODE_PRECISION) {
+    H5Pset_zfp_precision(prop_id, (unsigned int)compressionPar);
+  } else if (compressionMode == SW4_ZFP_MODE_ACCURACY) {
+    H5Pset_zfp_accuracy(prop_id, compressionPar);
+  } else if (compressionMode == SW4_ZFP_MODE_REVERSIBLE) {
+    H5Pset_zfp_reversible(prop_id);
+  }
+#endif
+#ifdef USE_SZ
+  else if (compressionMode == SW4_SZ) {
+    size_t cd_nelmts;
+    unsigned int* cd_values = NULL;
+    int dataType = SZ_DOUBLE;
+    if (m_precision == 4) dataType = SZ_FLOAT;
+    SZ_metaDataToCdArray(&cd_nelmts, &cd_values, dataType, 0, target_dims[3],
+                         target_dims[2], target_dims[1], target_dims[0]);
+    H5Pset_filter(prop_id, H5Z_FILTER_SZ, H5Z_FLAG_MANDATORY, cd_nelmts,
+                  cd_values);
+  }
+#endif
+}
+
+void ESSI3DHDF5::copy_velocity_dataset(hid_t src_dset, hid_t dst_dset,
+                                       const hsize_t (&src_dims)[4],
+                                       hid_t dtype,
+                                       const hsize_t (&chunk)[4]) const {
+  hsize_t block[4];
+  for (int i = 0; i < 4; i++)
+    block[i] = std::max<hsize_t>(1, std::min(chunk[i], src_dims[i]));
+
+  size_t max_elems = 1;
+  for (int i = 0; i < 4; i++) max_elems *= block[i];
+  std::vector<float> buffer_float;
+  std::vector<double> buffer_double;
+  void* buffer = NULL;
+  if (m_precision == 4) {
+    buffer_float.resize(max_elems);
+    buffer = buffer_float.data();
+  } else {
+    buffer_double.resize(max_elems);
+    buffer = buffer_double.data();
+  }
+
+  hid_t src_space = H5Dget_space(src_dset);
+  hid_t dst_space = H5Dget_space(dst_dset);
+
+  for (hsize_t t = 0; t < src_dims[0]; t += block[0])
+    for (hsize_t i = 0; i < src_dims[1]; i += block[1])
+      for (hsize_t j = 0; j < src_dims[2]; j += block[2])
+        for (hsize_t k = 0; k < src_dims[3]; k += block[3]) {
+          hsize_t start[4] = {t, i, j, k};
+          hsize_t count[4] = {std::min(block[0], src_dims[0] - t),
+                              std::min(block[1], src_dims[1] - i),
+                              std::min(block[2], src_dims[2] - j),
+                              std::min(block[3], src_dims[3] - k)};
+
+          hid_t memspace = H5Screate_simple(4, count, NULL);
+          H5Sselect_hyperslab(src_space, H5S_SELECT_SET, start, NULL, count,
+                              NULL);
+          H5Sselect_hyperslab(dst_space, H5S_SELECT_SET, start, NULL, count,
+                              NULL);
+
+          herr_t ierr =
+              H5Dread(src_dset, dtype, memspace, src_space, H5P_DEFAULT, buffer);
+          if (ierr < 0) {
+            cerr << "Error while copying ESSI restart dataset from "
+                 << m_filename << endl;
+            MPI_Abort(MPI_COMM_WORLD, ierr);
+          }
+
+          ierr = H5Dwrite(dst_dset, dtype, memspace, dst_space, H5P_DEFAULT,
+                          buffer);
+          if (ierr < 0) {
+            cerr << "Error while copying ESSI restart dataset into "
+                 << m_filename << endl;
+            MPI_Abort(MPI_COMM_WORLD, ierr);
+          }
+
+          H5Sclose(memspace);
+        }
+
+  H5Sclose(src_space);
+  H5Sclose(dst_space);
+}
+
+void ESSI3DHDF5::ensure_velocity_dataset(
+    const char* name, hid_t dtype, const hsize_t (&target_dims)[4],
+    const hsize_t (&chunk)[4], int compressionMode, double compressionPar) const {
+  hid_t dset = H5Dopen(m_file_id, name, H5P_DEFAULT);
+
+  if (dset >= 0) {
+    hsize_t dims[4], maxdims[4];
+    hid_t dspace = H5Dget_space(dset);
+    int rank = H5Sget_simple_extent_dims(dspace, dims, maxdims);
+    CHECK_INPUT(rank == 4,
+                "ESSI restart file dataset " << name << " does not have rank 4");
+    for (int d = 1; d < 4; d++)
+      CHECK_INPUT(dims[d] == target_dims[d],
+                  "ESSI restart file dataset " << name
+                                               << " has incompatible spatial size");
+
+    if (dims[0] < target_dims[0]) {
+      hsize_t new_dims[4];
+      for (int d = 0; d < 4; d++) new_dims[d] = target_dims[d];
+      herr_t ierr = -1;
+      H5E_BEGIN_TRY {
+        ierr = H5Dset_extent(dset, new_dims);
+      } H5E_END_TRY;
+
+      if (ierr < 0) {
+        std::string temp_name = std::string(name) + ".restart_tmp";
+        std::string backup_name = std::string(name) + ".restart_old";
+        H5E_BEGIN_TRY {
+          H5Ldelete(m_file_id, temp_name.c_str(), H5P_DEFAULT);
+          H5Ldelete(m_file_id, backup_name.c_str(), H5P_DEFAULT);
+        } H5E_END_TRY;
+
+        hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+        H5Pset_alloc_time(dcpl, H5D_ALLOC_TIME_LATE);
+        H5Pset_fill_time(dcpl, H5D_FILL_TIME_NEVER);
+        H5Pset_chunk(dcpl, 4, chunk);
+        apply_velocity_compression(dcpl, compressionMode, compressionPar,
+                                   target_dims);
+
+        hsize_t max_dims[4] = {H5S_UNLIMITED, target_dims[1], target_dims[2],
+                               target_dims[3]};
+        hid_t new_space = H5Screate_simple(4, target_dims, max_dims);
+        hid_t new_dset =
+            H5Dcreate2(m_file_id, temp_name.c_str(), dtype, new_space,
+                       H5P_DEFAULT, dcpl, H5P_DEFAULT);
+        CHECK_INPUT(new_dset >= 0,
+                    "Could not rebuild ESSI restart dataset " << name);
+
+        hsize_t old_dims[4];
+        for (int d = 0; d < 4; d++) old_dims[d] = dims[d];
+        copy_velocity_dataset(dset, new_dset, old_dims, dtype, chunk);
+
+        H5Dclose(new_dset);
+        H5Sclose(new_space);
+        H5Pclose(dcpl);
+        H5Sclose(dspace);
+        H5Dclose(dset);
+
+        herr_t link_err = H5Lmove(m_file_id, name, m_file_id,
+                                  backup_name.c_str(), H5P_DEFAULT,
+                                  H5P_DEFAULT);
+        CHECK_INPUT(link_err >= 0,
+                    "Could not move old ESSI restart dataset " << name);
+        link_err = H5Lmove(m_file_id, temp_name.c_str(), m_file_id, name,
+                           H5P_DEFAULT, H5P_DEFAULT);
+        CHECK_INPUT(link_err >= 0,
+                    "Could not rename rebuilt ESSI restart dataset " << name);
+        H5E_BEGIN_TRY {
+          H5Ldelete(m_file_id, backup_name.c_str(), H5P_DEFAULT);
+        } H5E_END_TRY;
+        return;
+      }
+    }
+
+    H5Sclose(dspace);
+    H5Dclose(dset);
+    return;
+  }
+
+  hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+  H5Pset_alloc_time(dcpl, H5D_ALLOC_TIME_LATE);
+  H5Pset_fill_time(dcpl, H5D_FILL_TIME_NEVER);
+  H5Pset_chunk(dcpl, 4, chunk);
+  apply_velocity_compression(dcpl, compressionMode, compressionPar,
+                             target_dims);
+
+  hsize_t max_dims[4] = {H5S_UNLIMITED, target_dims[1], target_dims[2],
+                         target_dims[3]};
+  hid_t dspace = H5Screate_simple(4, target_dims, max_dims);
+  dset = H5Dcreate2(m_file_id, name, dtype, dspace, H5P_DEFAULT, dcpl,
+                    H5P_DEFAULT);
+  CHECK_INPUT(dset >= 0, "Could not create ESSI restart dataset " << name);
+  H5Dclose(dset);
+  H5Sclose(dspace);
+  H5Pclose(dcpl);
 }
 
 void ESSI3DHDF5::write_header(double h, double (&lonlat_origin)[2], double az,
@@ -345,91 +591,23 @@ void ESSI3DHDF5::init_write_vel(bool isRestart, int ntimestep,
   hid_t dtype = H5T_NATIVE_DOUBLE;
   if (m_precision == 4) dtype = H5T_NATIVE_FLOAT;
 
-  // Create the extendible velocity data space and chunk
-  hsize_t num_dims = 4;
-  // m_xvel_dataspace_id = H5Screate_simple(num_dims, m_global_dims, dims);
-  hid_t prop_id = H5Pcreate(H5P_DATASET_CREATE);
-  H5Pset_alloc_time(prop_id, H5D_ALLOC_TIME_LATE);
-  H5Pset_fill_time(prop_id, H5D_FILL_TIME_NEVER);
-
   if (ntimestep > 0)
     m_cycle_dims[0] = ntimestep;
   else
     printf("Error with m_ntimestep=%d!\n", ntimestep);
 
-  hsize_t my_chunk[4] = {0, 0, 0, 0};
+  hsize_t num_dims = 4;
+  hsize_t my_chunk[4] = {1, 1, 1, 1};
+  hsize_t target_dims[4];
+  for (int i = 0; i < 4; i++) target_dims[i] = m_cycle_dims[i];
 
-  if (compressionMode > 0) {
-    MPI_Allreduce(&m_window_dims[1], &my_chunk[1], 3, MPI_UNSIGNED_LONG_LONG,
-                  MPI_MAX, MPI_COMM_WORLD);
+  configure_velocity_chunks(my_chunk, target_dims, bufferInterval);
 
-    // Keep last dimension (z)
-    for (int i = 1; i < 3; i++) {
-      if (my_chunk[i] > 4) my_chunk[i] = ((hsize_t)(my_chunk[i] / 4)) * 4;
-    }
-
-    my_chunk[0] = bufferInterval;
-
-    char* env_char = NULL;
-    env_char = getenv("SSI_CHUNK_X");
-    if (env_char != NULL) my_chunk[1] = atoi(env_char);
-
-    env_char = getenv("SSI_CHUNK_Y");
-    if (env_char != NULL) my_chunk[2] = atoi(env_char);
-
-    env_char = getenv("SSI_CHUNK_Z");
-    if (env_char != NULL) my_chunk[3] = atoi(env_char);
-
-    hsize_t total_chunk_size = m_precision;
-    for (int i = 0; i < num_dims; i++) total_chunk_size *= my_chunk[i];
-
-    // Make sure chunk size is less than 4GB, which is the HDF5 chunk limit
-    while (total_chunk_size >= 4294967295llu) {
-      if (my_chunk[1] > my_chunk[2])
-        my_chunk[1] /= 2;
-      else
-        my_chunk[2] /= 2;
-      total_chunk_size /= 2;
-    }
-
-    H5Pset_chunk(prop_id, num_dims, my_chunk);
-
-    if (myRank == 0) {
-      /* if (debug && myRank == 0) { */
-      printf("SSI ouput chunk sizes:");
-      for (int i = 0; i < num_dims; i++) printf("%llu  ", my_chunk[i]);
-      printf("\n");
-      fflush(stdout);
-    }
-
-    if (compressionMode == SW4_SZIP) {
-      H5Pset_szip(prop_id, H5_SZIP_NN_OPTION_MASK, 32);
-    } else if (compressionMode == SW4_ZLIB) {
-      H5Pset_deflate(prop_id, (int)compressionPar);
-    }
-#ifdef USE_ZFP
-    else if (compressionMode == SW4_ZFP_MODE_RATE) {
-      H5Pset_zfp_rate(prop_id, compressionPar);
-    } else if (compressionMode == SW4_ZFP_MODE_PRECISION) {
-      H5Pset_zfp_precision(prop_id, (unsigned int)compressionPar);
-    } else if (compressionMode == SW4_ZFP_MODE_ACCURACY) {
-      H5Pset_zfp_accuracy(prop_id, compressionPar);
-    } else if (compressionMode == SW4_ZFP_MODE_REVERSIBLE) {
-      H5Pset_zfp_reversible(prop_id);
-    }
-#endif
-#ifdef USE_SZ
-    else if (compressionMode == SW4_SZ) {
-      size_t cd_nelmts;
-      unsigned int* cd_values = NULL;
-      int dataType = SZ_DOUBLE;
-      if (m_precision == 4) dataType = SZ_FLOAT;
-      SZ_metaDataToCdArray(&cd_nelmts, &cd_values, dataType, 0, m_cycle_dims[3],
-                           m_cycle_dims[2], m_cycle_dims[1], m_cycle_dims[0]);
-      H5Pset_filter(prop_id, H5Z_FILTER_SZ, H5Z_FLAG_MANDATORY, cd_nelmts,
-                    cd_values);
-    }
-#endif
+  if (myRank == 0 && compressionMode > 0) {
+    printf("SSI ouput chunk sizes:");
+    for (int i = 0; i < num_dims; i++) printf("%llu  ", my_chunk[i]);
+    printf("\n");
+    fflush(stdout);
   }
 
   if (debug && myRank == 0) {
@@ -444,27 +622,37 @@ void ESSI3DHDF5::init_write_vel(bool isRestart, int ntimestep,
   hid_t dset, dspace;
   if (myRank == 0) {
     for (int c = 0; c < 3; c++) {
-      dspace = H5Screate_simple(num_dims, m_cycle_dims, m_cycle_dims);
       char var[100];
       sprintf(var, "vel_%d ijk layout", c);
 
       if (isRestart) {
-          dset = H5Dopen(m_file_id, var, H5P_DEFAULT);
+        ensure_velocity_dataset(var, dtype, target_dims, my_chunk,
+                                compressionMode, compressionPar);
+      } else {
+        hid_t prop_id = H5Pcreate(H5P_DATASET_CREATE);
+        H5Pset_alloc_time(prop_id, H5D_ALLOC_TIME_LATE);
+        H5Pset_fill_time(prop_id, H5D_FILL_TIME_NEVER);
+        H5Pset_chunk(prop_id, num_dims, my_chunk);
+        apply_velocity_compression(prop_id, compressionMode, compressionPar,
+                                   target_dims);
+
+        hsize_t max_dims[4] = {H5S_UNLIMITED, target_dims[1], target_dims[2],
+                               target_dims[3]};
+        dspace = H5Screate_simple(num_dims, target_dims, max_dims);
+        dset = H5Dcreate2(m_file_id, var, dtype, dspace, H5P_DEFAULT, prop_id,
+                          H5P_DEFAULT);
+        if (dset < 0) {
+          cerr << "Error with H5Dcreate/open!" << std::endl;
+          MPI_Abort(MPI_COMM_WORLD, -1);
+        }
+        H5Dclose(dset);
+        H5Sclose(dspace);
+        H5Pclose(prop_id);
       }
-      else {
-          dset = H5Dcreate2(m_file_id, var, dtype, dspace, H5P_DEFAULT, prop_id,
-                            H5P_DEFAULT);
-      }
-      if (dset < 0) {
-        cerr << "Error with H5Dcreate/open!" << std::endl;
-        MPI_Abort(MPI_COMM_WORLD, -1);
-      }
-      H5Dclose(dset);
     }
     H5Fclose(m_file_id);
     m_file_id = 0;
   }
-  H5Pclose(prop_id);
 #endif
   return;
 }

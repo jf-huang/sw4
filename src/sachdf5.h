@@ -46,6 +46,7 @@
 
 int createTimeSeriesHDF5File(vector<TimeSeries *> &TimeSeries, int totalSteps,
                              float_sw4 delta, string suffix);
+int receiverHDF5NeedsResize(vector<TimeSeries *> &TimeSeries, int totalSteps);
 int writeTimeSeriesHDF5File(vector<TimeSeries *> &TimeSeries, int npts,
                             void *data);
 
