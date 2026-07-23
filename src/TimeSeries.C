@@ -114,6 +114,20 @@ int get_restart_hdf5_dataset_names(TimeSeries::receiverMode mode,
 
   return 0;
 }
+
+hsize_t get_restart_hdf5_dataset_length(hid_t grp, const std::string& name) {
+  hid_t dset = H5Dopen(grp, name.c_str(), H5P_DEFAULT);
+  if (dset < 0) return 0;
+
+  hid_t dspace = H5Dget_space(dset);
+  hsize_t dims = 0;
+  if (dspace >= 0) {
+    H5Sget_simple_extent_dims(dspace, &dims, NULL);
+    H5Sclose(dspace);
+  }
+  H5Dclose(dset);
+  return dims;
+}
 }  // namespace
 #endif
 
@@ -3165,7 +3179,38 @@ void TimeSeries::readSACHDF5(EW* ew, string FileName, bool ignore_utc) {
     return;
   }
 
-  readAttrInt(grp, "NPTS", &npts);
+  int stored_npts = 0;
+  int npts_status = readAttrInt(grp, "NPTS", &stored_npts);
+  hsize_t available_npts = 0;
+  for (int q = 0; q < ndset; q++) {
+    hsize_t dset_npts = get_restart_hdf5_dataset_length(grp, dset_names[q]);
+    if (dset_npts == 0) {
+      cout << "ERROR: receiver HDF5 group [" << m_staName << "] in file ["
+           << FileName << "] is missing dataset [" << dset_names[q]
+           << "] needed for restart" << endl;
+      H5Gclose(grp);
+      H5Fclose(fid);
+      return;
+    }
+    if (q == 0 || dset_npts < available_npts) available_npts = dset_npts;
+  }
+
+  if (npts_status < 0 || stored_npts <= 0) {
+    cout << "WARNING: receiver HDF5 group [" << m_staName << "] in file ["
+         << FileName << "] has an invalid NPTS attribute; restarting from the "
+         << "available dataset length" << endl;
+    stored_npts = static_cast<int>(available_npts);
+  }
+
+  npts = stored_npts;
+  if (npts > static_cast<int>(available_npts)) {
+    cout << "WARNING: receiver HDF5 group [" << m_staName << "] in file ["
+         << FileName << "] reports NPTS=" << npts << " but only "
+         << static_cast<unsigned long long>(available_npts)
+         << " samples are present on disk; restarting from available data"
+         << endl;
+    npts = static_cast<int>(available_npts);
+  }
   if (npts <= 1) {
     cout << "ERROR: observed data is too short" << endl;
     cout << "    File " << FileName << " not read." << endl;

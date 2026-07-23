@@ -256,7 +256,7 @@ int openWriteData(hid_t loc, const char *name, hid_t type_id, void *data,
   /* double stime, etime, etime1; */
   hid_t dset, filespace, dxpl;
   herr_t ret;
-  hsize_t dims[3];
+  hsize_t dims[3], max_dims[3];
 
   /* stime = MPI_Wtime(); */
 
@@ -269,17 +269,60 @@ int openWriteData(hid_t loc, const char *name, hid_t type_id, void *data,
   dset = H5Dopen(loc, name, H5P_DEFAULT);
   if (dset < 0) {
     printf("%s: Error with H5Dopen [%s]\n", __func__, name);
+    H5Pclose(dxpl);
     return -1;
   }
 
   filespace = H5Dget_space(dset);
-  H5Sget_simple_extent_dims(filespace, dims, NULL);
-  if (dims[0] < start[0] + count[0]) count[0] = dims[0] - start[0];
+  H5Sget_simple_extent_dims(filespace, dims, max_dims);
+  if (start[0] > dims[0]) {
+    printf(
+        "%s: Error writing dataset [%s], restart wants to append at sample "
+        "%llu but the file only contains %llu samples. Recreate the receiver "
+        "HDF5 file.\n",
+        __func__, name, static_cast<unsigned long long>(start[0]),
+        static_cast<unsigned long long>(dims[0]));
+    H5Sclose(filespace);
+    H5Dclose(dset);
+    H5Pclose(dxpl);
+    return -1;
+  }
+  if (dims[0] < start[0] + count[0]) {
+    hid_t dcpl = H5Dget_create_plist(dset);
+    H5D_layout_t layout = H5Pget_layout(dcpl);
+    H5Pclose(dcpl);
+
+    hsize_t needed_dims = start[0] + count[0];
+    bool can_extend =
+        layout == H5D_CHUNKED &&
+        (max_dims[0] == H5S_UNLIMITED || max_dims[0] >= needed_dims);
+
+    if (can_extend && H5Dset_extent(dset, &needed_dims) >= 0) {
+      H5Sclose(filespace);
+      filespace = H5Dget_space(dset);
+      H5Sget_simple_extent_dims(filespace, dims, max_dims);
+    } else {
+      printf(
+          "%s: Error writing dataset [%s], restart needs %llu samples but the "
+          "existing dataset only allocates %llu and cannot be extended. "
+          "Recreate the receiver HDF5 file.\n",
+          __func__, name,
+          static_cast<unsigned long long>(needed_dims),
+          static_cast<unsigned long long>(dims[0]));
+      H5Sclose(filespace);
+      H5Dclose(dset);
+      H5Pclose(dxpl);
+      return -1;
+    }
+  }
   H5Sselect_hyperslab(filespace, H5S_SELECT_SET, start, NULL, count, NULL);
 
   ret = H5Dwrite(dset, type_id, H5S_ALL, filespace, dxpl, data);
   if (ret < 0) {
     printf("%s: Error with H5Dwrite [%s]\n", __func__, name);
+    H5Pclose(dxpl);
+    if (filespace != H5S_ALL) H5Sclose(filespace);
+    H5Dclose(dset);
     return -1;
   }
 
@@ -605,6 +648,16 @@ int receiverHDF5NeedsResize(vector<TimeSeries *> &TimeSeries, int totalSteps) {
     int ndset = get_hdf5_dataset_names(TimeSeries[ts], dset_names);
     hsize_t desired_dims =
         (hsize_t)(totalSteps / TimeSeries[ts]->getDownSample());
+    int stored_npts = 0;
+    if (readAttrInt(grp, "NPTS", &stored_npts) < 0 || stored_npts < 0) {
+      printf(
+          "%s: Recreating file [%s] because group [%s] has an invalid NPTS "
+          "attribute\n",
+          __func__, filename.c_str(), stationname.c_str());
+      H5Gclose(grp);
+      H5Fclose(fid);
+      return 1;
+    }
 
     for (int i = 0; i < ndset; i++) {
       hid_t dset = H5Dopen(grp, dset_names[i].c_str(), H5P_DEFAULT);
@@ -621,6 +674,18 @@ int receiverHDF5NeedsResize(vector<TimeSeries *> &TimeSeries, int totalSteps) {
       H5Sget_simple_extent_dims(dspace, &dims, NULL);
       H5Sclose(dspace);
       H5Dclose(dset);
+
+      if (static_cast<hsize_t>(stored_npts) > dims) {
+        printf(
+            "%s: Recreating file [%s] because group [%s] reports NPTS=%d but "
+            "dataset [%s/%s] only stores %llu samples\n",
+            __func__, filename.c_str(), stationname.c_str(), stored_npts,
+            stationname.c_str(), dset_names[i].c_str(),
+            static_cast<unsigned long long>(dims));
+        H5Gclose(grp);
+        H5Fclose(fid);
+        return 1;
+      }
 
       if (dims < desired_dims) {
         printf(
