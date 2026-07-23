@@ -33,6 +33,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <iomanip>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 
@@ -332,14 +334,76 @@ void ESSI3D::open_vel_file(int a_cycle, std::string& a_path, float_sw4 a_time,
   m_hdf5helper =
       new ESSI3DHDF5(s.str(), global, window, m_ihavearray, m_precision);
   m_hdf5helper->set_ihavearray(m_ihavearray);
+  m_hdf5helper->set_cycle_offset(0);
 
   if (debug && (m_rank == 0))
     cout << "Create/open hdf5 file: " << m_hdf5helper->filename() << endl;
 
   double hdf5_time = MPI_Wtime();
+  int total_velocity_steps = m_dumpInterval > 0
+                                 ? (int)ceil(m_ntimestep / m_dumpInterval)
+                                 : m_ntimestep;
+  hsize_t target_dims[4] = {(hsize_t)total_velocity_steps,
+                            (hsize_t)global[0],
+                            (hsize_t)global[1],
+                            (hsize_t)global[2]};
+  int use_continuation = 0;
+  std::string continuation_name;
+  std::string continuation_reason;
+  hsize_t cycle_offset =
+      m_dumpInterval != -1 ? (hsize_t)((a_cycle - 1) / m_dumpInterval)
+                           : (hsize_t)(a_cycle - 1);
+
+  if (m_rank == 0 && m_isRestart) {
+    continuation_reason =
+        m_hdf5helper->restart_incompatibility_reason(target_dims);
+    if (!continuation_reason.empty()) {
+      use_continuation = 1;
+      std::stringstream continuation;
+      continuation << s.str() << ".restart.cycle=";
+      continuation << std::setw(8) << std::setfill('0') << (a_cycle - 1);
+      continuation_name = continuation.str();
+    }
+  }
+
+  MPI_Bcast(&use_continuation, 1, MPI_INT, 0, comm);
+  int continuation_len = 0;
+  if (m_rank == 0) continuation_len = (int)continuation_name.size();
+  MPI_Bcast(&continuation_len, 1, MPI_INT, 0, comm);
+  int reason_len = 0;
+  if (m_rank == 0) reason_len = (int)continuation_reason.size();
+  MPI_Bcast(&reason_len, 1, MPI_INT, 0, comm);
+  if (use_continuation) {
+    std::vector<char> continuation_buf(continuation_len + 1, '\0');
+    std::vector<char> reason_buf(reason_len + 1, '\0');
+    if (m_rank == 0 && continuation_len > 0)
+      memcpy(continuation_buf.data(), continuation_name.c_str(),
+             continuation_len);
+    if (m_rank == 0 && reason_len > 0)
+      memcpy(reason_buf.data(), continuation_reason.c_str(), reason_len);
+    MPI_Bcast(continuation_buf.data(), continuation_len + 1, MPI_CHAR, 0, comm);
+    MPI_Bcast(reason_buf.data(), reason_len + 1, MPI_CHAR, 0, comm);
+    continuation_name.assign(continuation_buf.data(), continuation_len);
+    continuation_reason.assign(reason_buf.data(), reason_len);
+    m_hdf5helper->set_filename(continuation_name);
+    m_hdf5helper->set_cycle_offset(cycle_offset);
+  }
+
+  const bool reuse_restart_file = m_isRestart && use_continuation == 0;
+  int velocity_steps =
+      use_continuation
+          ? std::max<int>(1, total_velocity_steps - static_cast<int>(cycle_offset))
+          : total_velocity_steps;
 
   if (m_rank == 0) {
-    m_hdf5helper->create_file(m_isRestart, is_root);
+    if (use_continuation) {
+      cout << "ESSI restart output file [" << s.str()
+           << "] cannot be extended in place because " << continuation_reason
+           << "; writing continuation data to [" << continuation_name << "]"
+           << endl;
+    }
+
+    m_hdf5helper->create_file(reuse_restart_file, is_root);
 
     // Write header metadata
     double h = mEW->mGridSize[g];
@@ -351,7 +415,7 @@ void ESSI3D::open_vel_file(int a_cycle, std::string& a_path, float_sw4 a_time,
     double dt = mEW->getTimeStep();
     double output_timestep = m_dumpInterval > 0 ? dt * m_dumpInterval : dt;
 
-    if (!m_isRestart) {
+    if (!reuse_restart_file) {
       m_hdf5helper->write_header(h, lonlat_origin, az, origin, a_cycle, a_time,
                                  dt, output_timestep);
     }
@@ -362,19 +426,18 @@ void ESSI3D::open_vel_file(int a_cycle, std::string& a_path, float_sw4 a_time,
   MPI_Barrier(comm);
 
   if (m_dumpInterval > 0) {
-    int nstep = (int)ceil(m_ntimestep / m_dumpInterval);
     if (m_compressionMode > 0)
-      m_hdf5helper->init_write_vel(m_isRestart, nstep, m_compressionMode,
+      m_hdf5helper->init_write_vel(reuse_restart_file, velocity_steps, m_compressionMode,
                                    m_compressionPar, m_bufferInterval);
     else
-      m_hdf5helper->init_write_vel(m_isRestart, nstep, 0, 0.0,
+      m_hdf5helper->init_write_vel(reuse_restart_file, velocity_steps, 0, 0.0,
                                    m_bufferInterval);
   } else {
     if (m_compressionMode > 0)
-      m_hdf5helper->init_write_vel(m_isRestart, m_ntimestep, m_compressionMode,
+      m_hdf5helper->init_write_vel(reuse_restart_file, velocity_steps, m_compressionMode,
                                    m_compressionPar, m_bufferInterval);
     else
-      m_hdf5helper->init_write_vel(m_isRestart, m_ntimestep, 0, 0.0,
+      m_hdf5helper->init_write_vel(reuse_restart_file, velocity_steps, 0, 0.0,
                                    m_bufferInterval);
   }
 

@@ -62,8 +62,12 @@ class ESSI3DHDF5 {
                       double ZFPpar, int dumpInterval);
 
   const std::string& filename() { return m_filename; };
+  void set_filename(const std::string& filename) { m_filename = filename; }
   void set_ihavearray(bool ihavearray) { m_ihavearray = ihavearray; };
+  void set_cycle_offset(hsize_t cycle_offset) { m_cycle_offset = cycle_offset; }
   void finalize_hdf5();
+  std::string restart_incompatibility_reason(
+      const hsize_t (&target_dims)[4]) const;
 
  protected:
  private:
@@ -82,6 +86,7 @@ class ESSI3DHDF5 {
   hsize_t m_global_dims[4];  // unlimited
   hsize_t m_cycle_dims[4];   // for all cycles until now
   hsize_t m_slice_dims[4];   // for just a column
+  hsize_t m_cycle_offset;
 
   hid_t m_file_id;
   hid_t m_es_id;

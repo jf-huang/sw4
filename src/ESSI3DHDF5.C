@@ -101,6 +101,7 @@ ESSI3DHDF5::ESSI3DHDF5(const std::string& filename, int (&global)[3],
 
   m_file_id = 0;
   m_es_id = 0;
+  m_cycle_offset = 0;
 #endif
 }
 
@@ -183,25 +184,6 @@ void ESSI3DHDF5::configure_velocity_chunks(
 
   for (int i = 1; i < 4; i++)
     if (chunk[i] > target_dims[i]) chunk[i] = target_dims[i];
-
-  const hsize_t max_chunk_bytes = 268435456ull;
-  hsize_t total_chunk_size = m_precision;
-  for (int i = 0; i < 4; i++) total_chunk_size *= chunk[i];
-
-  while (total_chunk_size > max_chunk_bytes) {
-    int reduce_dim = 1;
-    for (int i = 2; i < 4; i++)
-      if (chunk[i] > chunk[reduce_dim]) reduce_dim = i;
-
-    if (chunk[reduce_dim] > 1) {
-      total_chunk_size /= 2;
-      chunk[reduce_dim] = std::max<hsize_t>(1, chunk[reduce_dim] / 2);
-    } else if (chunk[0] > 1) {
-      total_chunk_size /= 2;
-      chunk[0] = std::max<hsize_t>(1, chunk[0] / 2);
-    } else
-      break;
-  }
 }
 
 void ESSI3DHDF5::apply_velocity_compression(
@@ -395,6 +377,78 @@ void ESSI3DHDF5::ensure_velocity_dataset(
   H5Dclose(dset);
   H5Sclose(dspace);
   H5Pclose(dcpl);
+}
+
+std::string ESSI3DHDF5::restart_incompatibility_reason(
+    const hsize_t (&target_dims)[4]) const {
+#ifdef USE_HDF5
+  hid_t fid = H5Fopen(m_filename.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+  if (fid < 0)
+    return "existing file could not be opened";
+
+  for (int c = 0; c < 3; c++) {
+    char var[100];
+    sprintf(var, "vel_%d ijk layout", c);
+    hid_t dset = H5Dopen(fid, var, H5P_DEFAULT);
+    if (dset < 0) {
+      H5Fclose(fid);
+      std::stringstream ss;
+      ss << "dataset [" << var << "] is missing";
+      return ss.str();
+    }
+
+    hid_t dspace = H5Dget_space(dset);
+    hsize_t dims[4], maxdims[4];
+    int rank = H5Sget_simple_extent_dims(dspace, dims, maxdims);
+    H5Sclose(dspace);
+    if (rank != 4) {
+      H5Dclose(dset);
+      H5Fclose(fid);
+      std::stringstream ss;
+      ss << "dataset [" << var << "] has rank " << rank << " instead of 4";
+      return ss.str();
+    }
+
+    for (int d = 1; d < 4; d++) {
+      if (dims[d] != target_dims[d]) {
+        H5Dclose(dset);
+        H5Fclose(fid);
+        std::stringstream ss;
+        ss << "dataset [" << var << "] has spatial dimension " << d << "="
+           << static_cast<unsigned long long>(dims[d]) << " but restart needs "
+           << static_cast<unsigned long long>(target_dims[d]);
+        return ss.str();
+      }
+    }
+
+    if (dims[0] < target_dims[0]) {
+      hid_t dcpl = H5Dget_create_plist(dset);
+      H5D_layout_t layout = H5Pget_layout(dcpl);
+      H5Pclose(dcpl);
+      H5Dclose(dset);
+
+      if (layout != H5D_CHUNKED) {
+        H5Fclose(fid);
+        std::stringstream ss;
+        ss << "dataset [" << var << "] is not chunked";
+        return ss.str();
+      }
+      if (!(maxdims[0] == H5S_UNLIMITED || maxdims[0] >= target_dims[0])) {
+        H5Fclose(fid);
+        std::stringstream ss;
+        ss << "dataset [" << var << "] has fixed time max dimension "
+           << static_cast<unsigned long long>(maxdims[0]) << " but restart needs "
+           << static_cast<unsigned long long>(target_dims[0]);
+        return ss.str();
+      }
+    } else {
+      H5Dclose(dset);
+    }
+  }
+
+  H5Fclose(fid);
+#endif
+  return "";
 }
 
 void ESSI3DHDF5::write_header(double h, double (&lonlat_origin)[2], double az,
@@ -693,7 +747,7 @@ void ESSI3DHDF5::write_vel(void* window_array, int comp, int cycle, int nstep) {
   hid_t window_id = H5Screate_simple(vel_dims, buf_window_dims, NULL);
 
   hsize_t start[4] = {0, 0, 0, 0};
-  start[0] = cycle - nstep;
+  start[0] = cycle - nstep - m_cycle_offset;
   start[1] = m_window[0];  // local index lo relative to global
   start[2] = m_window[2];  // local index lo relative to global
   start[3] = m_window[4];  // local index lo relative to global
