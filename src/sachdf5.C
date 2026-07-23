@@ -623,6 +623,13 @@ int receiverHDF5NeedsResize(vector<TimeSeries *> &TimeSeries, int totalSteps) {
       H5Dclose(dset);
 
       if (dims < desired_dims) {
+        printf(
+            "%s: Recreating file [%s] because the restart duration needs %llu "
+            "samples but dataset [%s/%s] only allocates %llu\n",
+            __func__, filename.c_str(),
+            static_cast<unsigned long long>(desired_dims),
+            stationname.c_str(), dset_names[i].c_str(),
+            static_cast<unsigned long long>(dims));
         H5Gclose(grp);
         H5Fclose(fid);
         return 1;

@@ -34,6 +34,7 @@
 #include <mpi.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
@@ -54,6 +55,67 @@ using namespace std;
 
 void parsedate(char* datestr, int& year, int& month, int& day, int& hour,
                int& minute, int& second, int& msecond, int& fail);
+
+#ifdef USE_HDF5
+namespace {
+int get_restart_hdf5_dataset_names(TimeSeries::receiverMode mode,
+                                   bool xyzcomponent,
+                                   std::string dset_names[9]) {
+  if (mode == TimeSeries::Displacement) {
+    if (xyzcomponent) {
+      dset_names[0] = "X";
+      dset_names[1] = "Y";
+      dset_names[2] = "Z";
+    } else {
+      dset_names[0] = "EW";
+      dset_names[1] = "NS";
+      dset_names[2] = "UP";
+    }
+    return 3;
+  } else if (mode == TimeSeries::Velocity) {
+    if (xyzcomponent) {
+      dset_names[0] = "Vx";
+      dset_names[1] = "Vy";
+      dset_names[2] = "Vz";
+    } else {
+      dset_names[0] = "Vew";
+      dset_names[1] = "Vns";
+      dset_names[2] = "Vup";
+    }
+    return 3;
+  } else if (mode == TimeSeries::Div) {
+    dset_names[0] = "Div";
+    return 1;
+  } else if (mode == TimeSeries::Curl) {
+    dset_names[0] = "Curlx";
+    dset_names[1] = "Curly";
+    dset_names[2] = "Curlz";
+    return 3;
+  } else if (mode == TimeSeries::Strains) {
+    dset_names[0] = "Uxx";
+    dset_names[1] = "Uyy";
+    dset_names[2] = "Uzz";
+    dset_names[3] = "Uxy";
+    dset_names[4] = "Uxz";
+    dset_names[5] = "Uyz";
+    return 6;
+  } else if (mode == TimeSeries::DisplacementGradient) {
+    dset_names[0] = "DUXDX";
+    dset_names[1] = "DUXDY";
+    dset_names[2] = "DUXDZ";
+    dset_names[3] = "DUYDX";
+    dset_names[4] = "DUYDY";
+    dset_names[5] = "DUYDZ";
+    dset_names[6] = "DUZDX";
+    dset_names[7] = "DUZDY";
+    dset_names[8] = "DUZDZ";
+    return 9;
+  }
+
+  return 0;
+}
+}  // namespace
+#endif
 
 TimeSeries::TimeSeries(EW* a_ew, std::string fileName, std::string staName,
                        receiverMode mode, bool sacFormat, bool usgsFormat,
@@ -3027,9 +3089,9 @@ static int cubic_interp(float* xi, float* yi, int nin, float* xo, float* yo,
 void TimeSeries::readSACHDF5(EW* ew, string FileName, bool ignore_utc) {
   /* bool debug = false; */
   hid_t fid, grp;
-  /* char data[128]; */
-  /* hsize_t ndim, dims[4]; */
-  int ret;
+  int ret, npts, sw4npts, ndset;
+  bool cartesian = true;
+  std::string dset_names[9];
 
   if (!m_myPoint) return;
 
@@ -3062,166 +3124,148 @@ void TimeSeries::readSACHDF5(EW* ew, string FileName, bool ignore_utc) {
     downsample = 1;
   }
 
-  std::string dset_names[3];
-  char unit[128];
-  readAttrStr(fid, "UNIT", unit);
-  bool foundd = (strstr(unit, "m") != NULL);
-  bool foundv = (strstr(unit, "m/s") != NULL);
-
-  if (foundd || foundv) {
-    // The file contains velocities or displacements.
-    bool cartesian = false;
-
-    grp = H5Gopen(fid, m_staName.c_str(), H5P_DEFAULT);
-    if (grp < 0) cout << "ERROR opening group [" << m_staName << "] !" << endl;
-
-    int is_nsew, npts, sw4npts;
-    readAttrInt(grp, "ISNSEW", &is_nsew);
-
-    bool has_nsew = H5Lexists(grp, "EW", H5P_DEFAULT) > 0;
-    bool has_xyz = H5Lexists(grp, "X", H5P_DEFAULT) > 0;
-
-    if (has_nsew && (is_nsew == 1 || !has_xyz)) {
-      dset_names[0] = "EW";
-      dset_names[1] = "NS";
-      dset_names[2] = "UP";
-    } else if (has_xyz) {
-      cartesian = true;
-      dset_names[0] = "X";
-      dset_names[1] = "Y";
-      dset_names[2] = "Z";
-    } else {
-      cout << "ERROR: no complete displacement component set in group ["
-           << m_staName << "]" << endl;
-      H5Gclose(grp);
-      H5Fclose(fid);
-      return;
-    }
-    m_xyzcomponent = cartesian;
-
-    readAttrInt(grp, "NPTS", &npts);
-    if (npts <= 1) {
-      cout << "ERROR: observed data is too short" << endl;
-      cout << "    File " << FileName << " not read." << endl;
-      return;
-    }
-
-    float dt, tstart;
-    readAttrFloat(fid, "DELTA", &dt);
-
-    sw4npts = (npts - 1) * downsample + 1;
-
-    // Only allocate arrays if we aren't doing a restart
-    if (!mIsRestart) {
-      // Assumes starting from time 0 and timestep 0
-      tstart = 0;
-      allocateRecordingArrays(sw4npts, m_t0 + tstart, tstart);
-    } else {
-      m_nptsWritten = npts;
-    }
-
-    if (mAllocatedSize <= 0) {
-      cout << "ERROR: recording arrays not allocated!" << endl;
-      return;
-    }
-
-    m_dt = dt / downsample;
-    mLastTimeStep = sw4npts - 1;
-
-    float* buf_0 = new float[npts];
-    float* buf_1 = new float[npts];
-    float* buf_2 = new float[npts];
-
-    readHDF5Data(grp, dset_names[0].c_str(), npts, buf_0);
-    readHDF5Data(grp, dset_names[1].c_str(), npts, buf_1);
-    readHDF5Data(grp, dset_names[2].c_str(), npts, buf_2);
-
-    // Mapping to invert (e,n) to (x,y) components, Only needed in the
-    // non-cartesian case.
-    float_sw4 deti = 1.0 / (m_thynrm * m_calpha + m_thxnrm * m_salpha);
-    float_sw4 a11 = m_calpha * deti;
-    float_sw4 a12 = m_thxnrm * deti;
-    float_sw4 a21 = -m_salpha * deti;
-    float_sw4 a22 = m_thynrm * deti;
-
-    if (downsample > 1) {
-      float* buf_0up = new float[sw4npts];
-      float* buf_1up = new float[sw4npts];
-      float* buf_2up = new float[sw4npts];
-      float* x = new float[npts];
-      float* nx = new float[sw4npts];
-      for (int i = 0; i < npts; i++) x[i] = i * downsample;
-
-      for (int i = 0; i < sw4npts; i++) nx[i] = i;
-
-      // Cubic interpolation
-      ret = cubic_interp(x, buf_0, npts, nx, buf_0up, sw4npts);
-      if (ret < 0) {
-        cout << "ERROR: cubic_interp failed!" << endl;
-        return;
-      }
-      ret = cubic_interp(x, buf_1, npts, nx, buf_1up, sw4npts);
-      if (ret < 0) {
-        cout << "ERROR: cubic_interp failed!" << endl;
-        return;
-      }
-      ret = cubic_interp(x, buf_2, npts, nx, buf_2up, sw4npts);
-      if (ret < 0) {
-        cout << "ERROR: cubic_interp failed!" << endl;
-        return;
-      }
-
-      for (int i = 0; i < mAllocatedSize; i++) {
-        /* for (int i = 0; i < npts; i++) { */
-        if (cartesian) {
-          mRecordedSol[0][i] = (float_sw4)buf_0up[i];
-          mRecordedSol[1][i] = (float_sw4)buf_1up[i];
-          mRecordedSol[2][i] = (float_sw4)buf_2up[i];
-        } else {
-          mRecordedSol[0][i] =
-              a11 * (float_sw4)buf_1up[i] + a12 * (float_sw4)buf_0up[i];
-          mRecordedSol[1][i] =
-              a21 * (float_sw4)buf_1up[i] + a22 * (float_sw4)buf_0up[i];
-          mRecordedSol[2][i] = -(float_sw4)buf_2up[i];
-        }
-      }
-
-      delete[] buf_0up;
-      delete[] buf_1up;
-      delete[] buf_2up;
-      delete[] x;
-      delete[] nx;
-    } else {
-      for (int i = 0; i < mAllocatedSize; i++) {
-        if (cartesian) {
-          mRecordedSol[0][i] = (float_sw4)buf_0[i];
-          mRecordedSol[1][i] = (float_sw4)buf_1[i];
-          mRecordedSol[2][i] = (float_sw4)buf_2[i];
-        } else {
-          mRecordedSol[0][i] =
-              a11 * (float_sw4)buf_1[i] + a12 * (float_sw4)buf_0[i];
-          mRecordedSol[1][i] =
-              a21 * (float_sw4)buf_1[i] + a22 * (float_sw4)buf_0[i];
-          mRecordedSol[2][i] = -(float_sw4)buf_2[i];
-        }
-      }
-    }
-
-    for (int i = 0; i < mAllocatedSize; i++) {
-      mRecordedFloats[0][i] = (float)mRecordedSol[0][i];
-      mRecordedFloats[1][i] = (float)mRecordedSol[1][i];
-      mRecordedFloats[2][i] = (float)mRecordedSol[2][i];
-    }
-
-    delete[] buf_0;
-    delete[] buf_1;
-    delete[] buf_2;
-    H5Gclose(grp);
-  } else {
-    cout << "ERROR: unit [" << unit
-         << "] is unrecognized! Currently supports m or m/s" << endl;
+  grp = H5Gopen(fid, m_staName.c_str(), H5P_DEFAULT);
+  if (grp < 0) {
+    cout << "ERROR opening group [" << m_staName << "] !" << endl;
+    H5Fclose(fid);
+    return;
   }
 
+  if (m_mode == Displacement || m_mode == Velocity) {
+    int is_nsew = 0;
+    readAttrInt(grp, "ISNSEW", &is_nsew);
+
+    const char* geographic_name =
+        m_mode == Displacement ? "EW" : "Vew";
+    const char* cartesian_name =
+        m_mode == Displacement ? "X" : "Vx";
+
+    bool has_geographic = H5Lexists(grp, geographic_name, H5P_DEFAULT) > 0;
+    bool has_cartesian = H5Lexists(grp, cartesian_name, H5P_DEFAULT) > 0;
+
+    if (has_geographic && (is_nsew == 1 || !has_cartesian)) {
+      cartesian = false;
+      ndset = get_restart_hdf5_dataset_names(m_mode, false, dset_names);
+    } else if (has_cartesian) {
+      cartesian = true;
+      ndset = get_restart_hdf5_dataset_names(m_mode, true, dset_names);
+    } else {
+      ndset = 0;
+    }
+    m_xyzcomponent = cartesian;
+  } else {
+    ndset = get_restart_hdf5_dataset_names(m_mode, true, dset_names);
+  }
+
+  if (ndset <= 0) {
+    cout << "ERROR: receiver HDF5 group [" << m_staName << "] in file ["
+         << FileName << "] is missing the datasets needed for restart" << endl;
+    H5Gclose(grp);
+    H5Fclose(fid);
+    return;
+  }
+
+  readAttrInt(grp, "NPTS", &npts);
+  if (npts <= 1) {
+    cout << "ERROR: observed data is too short" << endl;
+    cout << "    File " << FileName << " not read." << endl;
+    H5Gclose(grp);
+    H5Fclose(fid);
+    return;
+  }
+
+  float dt, tstart;
+  readAttrFloat(fid, "DELTA", &dt);
+
+  sw4npts = (npts - 1) * downsample + 1;
+
+  // Only allocate arrays if we aren't doing a restart
+  if (!mIsRestart) {
+    // Assumes starting from time 0 and timestep 0
+    tstart = 0;
+    allocateRecordingArrays(sw4npts, m_t0 + tstart, tstart);
+  } else {
+    m_nptsWritten = npts;
+  }
+
+  if (mAllocatedSize <= 0) {
+    cout << "ERROR: recording arrays not allocated!" << endl;
+    H5Gclose(grp);
+    H5Fclose(fid);
+    return;
+  }
+
+  m_dt = dt / downsample;
+  mLastTimeStep = sw4npts - 1;
+
+  float* buf[9];
+  for (int q = 0; q < ndset; q++) {
+    buf[q] = new float[npts];
+    readHDF5Data(grp, dset_names[q].c_str(), npts, buf[q]);
+  }
+
+  const int ncopy = std::min(sw4npts, mAllocatedSize);
+
+  // Mapping to invert (e,n) to (x,y) components, only needed for
+  // displacement and velocity receivers written in geographic coordinates.
+  float_sw4 deti = 1.0 / (m_thynrm * m_calpha + m_thxnrm * m_salpha);
+  float_sw4 a11 = m_calpha * deti;
+  float_sw4 a12 = m_thxnrm * deti;
+  float_sw4 a21 = -m_salpha * deti;
+  float_sw4 a22 = m_thynrm * deti;
+
+  if (downsample > 1) {
+    float* x = new float[npts];
+    float* nx = new float[sw4npts];
+    float* up[9];
+    for (int i = 0; i < npts; i++) x[i] = i * downsample;
+    for (int i = 0; i < sw4npts; i++) nx[i] = i;
+
+    for (int q = 0; q < ndset; q++) {
+      up[q] = new float[sw4npts];
+      ret = cubic_interp(x, buf[q], npts, nx, up[q], sw4npts);
+      if (ret < 0) {
+        cout << "ERROR: cubic_interp failed!" << endl;
+        for (int j = 0; j <= q; j++) delete[] up[j];
+        delete[] x;
+        delete[] nx;
+        for (int j = 0; j < ndset; j++) delete[] buf[j];
+        H5Gclose(grp);
+        H5Fclose(fid);
+        return;
+      }
+    }
+
+    for (int i = 0; i < ncopy; i++) {
+      if ((m_mode == Displacement || m_mode == Velocity) && !cartesian) {
+        mRecordedSol[0][i] = a11 * (float_sw4)up[1][i] + a12 * (float_sw4)up[0][i];
+        mRecordedSol[1][i] = a21 * (float_sw4)up[1][i] + a22 * (float_sw4)up[0][i];
+        mRecordedSol[2][i] = -(float_sw4)up[2][i];
+      } else {
+        for (int q = 0; q < ndset; q++) mRecordedSol[q][i] = (float_sw4)up[q][i];
+      }
+    }
+
+    for (int q = 0; q < ndset; q++) delete[] up[q];
+    delete[] x;
+    delete[] nx;
+  } else {
+    for (int i = 0; i < ncopy; i++) {
+      if ((m_mode == Displacement || m_mode == Velocity) && !cartesian) {
+        mRecordedSol[0][i] = a11 * (float_sw4)buf[1][i] + a12 * (float_sw4)buf[0][i];
+        mRecordedSol[1][i] = a21 * (float_sw4)buf[1][i] + a22 * (float_sw4)buf[0][i];
+        mRecordedSol[2][i] = -(float_sw4)buf[2][i];
+      } else {
+        for (int q = 0; q < ndset; q++) mRecordedSol[q][i] = (float_sw4)buf[q][i];
+      }
+    }
+  }
+
+  for (int i = 0; i < ncopy; i++)
+    for (int q = 0; q < m_nComp; q++) mRecordedFloats[q][i] = (float)mRecordedSol[q][i];
+
+  for (int q = 0; q < ndset; q++) delete[] buf[q];
+  H5Gclose(grp);
   H5Fclose(fid);
 }
 #endif
