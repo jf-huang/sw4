@@ -182,15 +182,17 @@ void MaterialSfile::set_material_properties(std::vector<Sarray> &rho,
             // Debug
             // weights should be within [0, 1]
             if (wghx > 1 || wghx < 0) {
-              printf("g=%d, sw4 (%d, %d, %d), mat (%d, %d, %d) wghx = %.2f\n",
-                     gr, i, j, k, i0, j0, k0, wghx);
+              if (wghx > 1.001 || wghx < -0.001)
+                printf("g=%d, sw4 (%d, %d, %d), mat (%d, %d, %d) wghx = %.2f\n",
+                       gr, i, j, k, i0, j0, k0, wghx);
               if (wghx > 1) wghx = 1;
               if (wghx < 0) wghx = 0;
             }
 
             if (wghy > 1 || wghy < 0) {
-              printf("g=%d, sw4 (%d, %d, %d), mat (%d, %d, %d) wghy = %.2f\n",
-                     gr, i, j, k, i0, j0, k0, wghy);
+              if (wghy > 1.001 || wghy < -0.001)
+                printf("g=%d, sw4 (%d, %d, %d), mat (%d, %d, %d) wghy = %.2f\n",
+                       gr, i, j, k, i0, j0, k0, wghy);
               if (wghy > 1) wghy = 1;
               if (wghy < 0) wghy = 0;
             }
