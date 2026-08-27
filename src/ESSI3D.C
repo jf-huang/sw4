@@ -222,13 +222,14 @@ void ESSI3D::update_image(int a_cycle, float_sw4 a_time, float_sw4 a_dt,
 #ifdef USE_HDF5
   int o_cycle = a_cycle;
   double hdf5_time = MPI_Wtime();
-  if (!m_fileOpen)  // must be first call, open file and write
-    open_vel_file(a_cycle, a_path, a_time, a_Z);
 
   if (m_dumpInterval != -1) {
     if (a_cycle % m_dumpInterval != 0 && a_cycle != mNumberOfTimeSteps) return;
     a_cycle /= m_dumpInterval;
   }
+
+  if (!m_fileOpen)  // open the file only when this step will actually write
+    open_vel_file(o_cycle, a_path, a_time, a_Z);
 
   write_image_hdf5(a_cycle, a_path, a_time, a_U);
 
@@ -401,6 +402,10 @@ void ESSI3D::open_vel_file(int a_cycle, std::string& a_path, float_sw4 a_time,
            << "] cannot be extended in place because " << continuation_reason
            << "; writing continuation data to [" << continuation_name << "]"
            << endl;
+    } else if (m_isRestart) {
+      cout << "ESSI restart reusing existing file [" << s.str()
+           << "] in place starting from stored sample "
+           << static_cast<unsigned long long>(cycle_offset) << endl;
     }
 
     m_hdf5helper->create_file(reuse_restart_file, is_root);

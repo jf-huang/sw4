@@ -48,8 +48,6 @@ __constant__ double cmem_acof_no_gp[384];
 #endif
 
 #ifdef USE_HDF5
-#include <unistd.h>
-
 #include "SfileOutput.h"
 #include "sachdf5.h"
 #endif
@@ -813,7 +811,6 @@ void EW::solve(vector<Source*>& a_Sources, vector<TimeSeries*>& a_TimeSeries,
     MPI_Bcast(&recreateFiles[0], static_cast<int>(recreateFiles.size()),
               MPI_INT, 0, MPI_COMM_WORLD);
 
-    const int max_open_attempts = 10;
     hdf5FileIndex = 0;
     for (map<string, vector<TimeSeries*> >::iterator it =
              hdf5TimeSeries.begin();
@@ -823,20 +820,6 @@ void EW::solve(vector<Source*>& a_Sources, vector<TimeSeries*>& a_TimeSeries,
         if (!restartHDF5Receivers || recreateFiles[hdf5FileIndex] == 1)
           it->second[tsi]->resetHDF5file();
       }
-
-      hid_t fid = 0;
-      for (int attempt = 0; attempt < max_open_attempts && fid <= 0;
-           attempt++) {
-        H5E_BEGIN_TRY {
-          fid = it->second[0]->openHDF5File("", true);
-        } H5E_END_TRY;
-        if (fid <= 0 && attempt + 1 < max_open_attempts) sleep(1);
-      }
-      CHECK_INPUT(fid > 0,
-                  "Could not open receiver HDF5 file "
-                      << it->second[0]->gethdf5FileName() << " on rank "
-                      << m_myRank << " after " << max_open_attempts
-                      << " attempts");
 
       if (restartHDF5Receivers && recreateFiles[hdf5FileIndex] == 1) {
         for (int tsi = 0; tsi < it->second.size(); tsi++)
@@ -1002,6 +985,7 @@ void EW::solve(vector<Source*>& a_Sources, vector<TimeSeries*>& a_TimeSeries,
     time_t now;
     time(&now);
     printf("Start time stepping at %s\n", ctime(&now));
+    fflush(stdout);
   }
   bool end_clean_time_reg = false;
   for (int currentTimeStep = beginCycle;

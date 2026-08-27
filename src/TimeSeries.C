@@ -1271,6 +1271,7 @@ void TimeSeries::write_hdf5_format(int npts, hid_t grp, float* y, float btime,
   }
 
   // write only new data
+  if (m_nptsWritten > write_npts) m_nptsWritten = write_npts;
   start = (hsize_t)m_nptsWritten;
   count = (hsize_t)(write_npts - m_nptsWritten);
 
@@ -3100,7 +3101,8 @@ static int cubic_interp(float* xi, float* yi, int nin, float* xo, float* yo,
   return 0;
 }
 
-void TimeSeries::readSACHDF5(EW* ew, string FileName, bool ignore_utc) {
+void TimeSeries::readSACHDF5(EW* ew, string FileName, bool ignore_utc,
+                             int checkpointCycle) {
   /* bool debug = false; */
   hid_t fid, grp;
   int ret, npts, sw4npts, ndset;
@@ -3210,6 +3212,13 @@ void TimeSeries::readSACHDF5(EW* ew, string FileName, bool ignore_utc) {
          << " samples are present on disk; restarting from available data"
          << endl;
     npts = static_cast<int>(available_npts);
+  }
+  if (checkpointCycle >= 0) {
+    int checkpoint_npts =
+        m_mode == Velocity ? checkpointCycle / downsample
+                           : (checkpointCycle + 1) / downsample;
+    if (checkpoint_npts < 0) checkpoint_npts = 0;
+    if (npts > checkpoint_npts) npts = checkpoint_npts;
   }
   if (npts <= 1) {
     cout << "ERROR: observed data is too short" << endl;
@@ -3336,7 +3345,7 @@ void TimeSeries::doRestart(EW* ew, bool ignore_utc, float_sw4 shift,
     std::string fullFilePath = ew->getPath();
     fullFilePath += "/" + m_hdf5Name;
 #ifdef USE_HDF5
-    if (m_myPoint) readSACHDF5(ew, fullFilePath, ignore_utc);
+    if (m_myPoint) readSACHDF5(ew, fullFilePath, ignore_utc, beginCycle);
 #else
     cout
         << "readSACHDF5: read from HDF5 file but sw4 is not compiled with HDF5!"

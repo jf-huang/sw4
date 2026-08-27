@@ -162,7 +162,8 @@ class TimeSeries {
   TimeSeries* getTS0Ptr() { return m_ts0Ptr; };
   int closeHDF5File();
   void resetHDF5file();
-  void readSACHDF5(EW* ew, string FileName, bool ignore_utc);
+  void readSACHDF5(EW* ew, string FileName, bool ignore_utc,
+                   int checkpointCycle = -1);
   hid_t openHDF5File(std::string suffix, bool quiet = false);
   void write_hdf5_format(int npts, hid_t loc, float* y, float btime, float dt,
                          char* var, float cmpinc, float cmpaz,
