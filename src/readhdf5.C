@@ -312,7 +312,8 @@ static herr_t traverse_func(hid_t loc_id, const char *grp_name,
         if (op_data->is_obs) {
           // Read data
           bool ignore_utc = false;
-          ts_ptr->readSACHDF5(op_data->ew, op_data->inFileName, ignore_utc);
+          ts_ptr->readSACHDF5(op_data->ew, op_data->inFileName, ignore_utc,
+                              -1);
 
           // Set reference UTC to simulation UTC, for easier plotting.
           ts_ptr->set_utc_to_simulation_utc();
